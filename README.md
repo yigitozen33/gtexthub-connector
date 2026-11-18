@@ -113,12 +113,13 @@ scripts/        esbuild derlemesi ve simge üretimi
   `CSC_LINK`, `CSC_KEY_PASSWORD` gizli değişkenleri) eklenmeli. Windows'ta SmartScreen uyarısı çıkar: bir kod imzalama sertifikası
   (`WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`) gerekir.
 - **Otomatik güncelleme yok.** Yeni sürüm elle kurulmalı.
-- **Web panelindeki indirme bağlantıları** henüz yok (Cihazlar sayfası "yakında" diyor); yayınlanan sürüm dosyalarına bağlanmalı.
+- **Web panelindeki indirme bağlantıları** `VITE_CONNECTOR_DOWNLOAD_MAC` / `VITE_CONNECTOR_DOWNLOAD_WIN` değişkenlerinden okunur;
+  boşken bağlantılar gizlidir. İlk sürüm yayınlandığında bu değişkenler sürüm dosyalarının adresleriyle doldurulmalı.
 - **Kanal listesi alan adı:** bağlayıcı spesifikasyonu `channelId` derken web istemcisi ve platform yolu `discordChannelId` okuyor.
   Bağlayıcı her iki alanı da gönderir.
 - **R19 cihaz API'leri** (`GET /deviceexpectedaccounts`, `POST /connectoraccountremovals`, `PATCH /connectorselfrevoke`,
-  `tokenMissing`, `unavailableReason`) bağlayıcıda sözleşmeye göre uygulandı ve sahte HTTP katmanıyla test edildi; önizleme
-  arka ucuna karşı canlı doğrulama henüz yapılmadı. Bu API'ler yoksa (ör. eski arka uç, `404`) bağlayıcı çalışmaya devam eder:
+  `tokenMissing`, `unavailableReason`) bağlayıcıda sözleşmeye göre uygulandı, sahte HTTP katmanıyla test edildi ve önizleme
+  arka ucuna karşı canlı smoke testiyle doğrulandı. Bu API'ler yoksa (ör. eski arka uç, `404`) bağlayıcı çalışmaya devam eder:
   beklenen hesap listesi boş kalır, kaldırma ve eşleştirmeyi kaldırma yerelde tamamlanır.
 - Discord istekleri platform modülüyle aynı `User-Agent` dizesini gönderir (`src/core/discord.ts`, `PLATFORM_USER_AGENT`).
   Platform modülü değişirse burası da güncellenmeli.
