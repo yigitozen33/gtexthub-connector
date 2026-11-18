@@ -104,6 +104,26 @@ const zoom = (f, k) => (x, y) => f(0.5 + (x - 0.5) / k, 0.5 + (y - 0.5) / k);
 mkdirSync(path.join(root, 'build'), { recursive: true });
 mkdirSync(path.join(root, 'assets'), { recursive: true });
 writeFileSync(path.join(root, 'build/icon.png'), png(1024, appIcon));
+
+// macOS .icns built directly from PNG entries (no iconutil / sips needed).
+function icns(entries) {
+  const parts = entries.map(([type, size]) => {
+    const data = png(size, appIcon);
+    const head = Buffer.alloc(8);
+    head.write(type, 0, 'ascii');
+    head.writeUInt32BE(data.length + 8, 4);
+    return Buffer.concat([head, data]);
+  });
+  const body = Buffer.concat(parts);
+  const head = Buffer.alloc(8);
+  head.write('icns', 0, 'ascii');
+  head.writeUInt32BE(body.length + 8, 4);
+  return Buffer.concat([head, body]);
+}
+writeFileSync(
+  path.join(root, 'build/icon.icns'),
+  icns([['icp4', 16], ['icp5', 32], ['ic11', 32], ['ic12', 64], ['ic07', 128], ['ic13', 256], ['ic08', 256], ['ic14', 512], ['ic09', 512], ['ic10', 1024]]),
+);
 writeFileSync(path.join(root, 'assets/icon.png'), png(256, appIcon));
 writeFileSync(path.join(root, 'assets/trayTemplate.png'), png(16, zoom(trayTemplate, 1.45)));
 writeFileSync(path.join(root, 'assets/trayTemplate@2x.png'), png(32, zoom(trayTemplate, 1.45)));
