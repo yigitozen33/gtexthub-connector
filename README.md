@@ -105,6 +105,9 @@ scripts/        esbuild derlemesi ve simge üretimi
 3. `.github/workflows/release.yml` testleri çalıştırır, macOS (dmg, arm64 + x64) ve Windows (NSIS, x64) kurulum dosyalarını
    **üretim** API adresiyle derler ve etiket için **taslak** bir GitHub sürümü oluşturup dosyaları ekler.
 4. Taslağı kontrol edip yayınlayın. İş akışı Actions sekmesinden elle de başlatılabilir (yalnızca derleme dosyaları, sürüm yok).
+5. **Test derlemesi:** `vX.Y.Z-preview.N` biçiminde bir etiket (ör. `git tag v0.1.0-preview.1 && git push origin v0.1.0-preview.1`)
+   aynı derlemeyi **önizleme** API'siyle yapar ve doğrudan indirilebilen bir **ön sürüm** (pre-release) yayınlar. Elle
+   başlatmada `env` girdisi `preview` seçilerek de önizleme derlemesi alınır.
 
 ## Açık konular
 

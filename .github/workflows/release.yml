@@ -1,6 +1,8 @@
 # Builds unsigned installers when a version tag is pushed (v*), and on demand.
 # macOS: dmg for arm64 and x64. Windows: NSIS installer for x64.
-# The builds talk to the production API (GTH_ENV=production).
+# A tag like v1.2.3 builds against the production API and opens a DRAFT release.
+# A tag like v1.2.3-preview.1 builds against the PREVIEW API and publishes a PRE-RELEASE
+# that testers can download directly. A manual run picks the API with the `env` input.
 # Code signing and notarization are NOT configured yet (see README, "Açık konular").
 name: release
 
@@ -8,6 +10,12 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      env:
+        description: API the installers talk to
+        type: choice
+        options: [production, preview]
+        default: production
 
 permissions:
   contents: read
@@ -43,7 +51,7 @@ jobs:
             target: --win
     runs-on: ${{ matrix.os }}
     env:
-      GTH_ENV: production
+      GTH_ENV: ${{ (contains(github.ref_name, '-preview') || inputs.env == 'preview') && 'preview' || 'production' }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v7
@@ -53,7 +61,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npx electron-builder ${{ matrix.target }} --publish never
+      - name: Package
+        shell: bash
+        run: |
+          version_args=()
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version_args=(-c.extraMetadata.version="${GITHUB_REF_NAME#v}")
+          fi
+          npx electron-builder ${{ matrix.target }} --publish never "${version_args[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: installers-${{ matrix.os }}
@@ -73,12 +88,20 @@ jobs:
         with:
           path: installers
           merge-multiple: true
-      - name: Create a draft GitHub release with the installers
+      - name: Create the GitHub release with the installers
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" installers/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft \
-            --title "GTextHub Bağlayıcı ${GITHUB_REF_NAME}" \
-            --notes "İmzasız derleme. Gerçek dağıtımdan önce kod imzalama ve notarization gerekir."
+          if [[ "${GITHUB_REF_NAME}" == *-preview* ]]; then
+            gh release create "${GITHUB_REF_NAME}" installers/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --prerelease \
+              --title "GTextHub Bağlayıcı ${GITHUB_REF_NAME} (test, önizleme sunucusu)" \
+              --notes "Test derlemesi: önizleme sunucusuna (xkjhy36p.mindbricks.dev) bağlanır. İmzasızdır; macOS'ta Sistem Ayarları > Gizlilik ve Güvenlik > Yine de Aç, Windows'ta Ek bilgi > Yine de çalıştır ile açılır."
+          else
+            gh release create "${GITHUB_REF_NAME}" installers/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --title "GTextHub Bağlayıcı ${GITHUB_REF_NAME}" \
+              --notes "İmzasız derleme. Gerçek dağıtımdan önce kod imzalama ve notarization gerekir."
+          fi
