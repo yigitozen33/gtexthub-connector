@@ -12,6 +12,7 @@ import {
   type DevicePlatform,
   type ExpectedAccount,
   PairingCodeInvalidError,
+  PairingThrottledError,
   hasErrorCode,
   isConnectivityError,
 } from '../core/connectorApi';
@@ -86,6 +87,8 @@ export function splitExpectedAccounts(
   }
   return { prompt, removed };
 }
+
+const PAIRING_THROTTLED_MESSAGE = 'Çok fazla deneme yapıldı, birkaç dakika sonra tekrar deneyin.';
 
 const UNPAIR_UNREACHABLE_NOTICE =
   'Eşleştirme bu bilgisayarda kaldırıldı ve yerel veriler silindi, ancak GTextHub sunucusuna ulaşılamadı. ' +
@@ -289,6 +292,10 @@ export class ConnectorController extends EventEmitter {
     } catch (err) {
       if (err instanceof PairingCodeInvalidError) {
         return { ok: false, message: 'Kod geçersiz, kullanılmış ya da süresi dolmuş. Web panelinden yeni bir kod alın.' };
+      }
+      if (err instanceof PairingThrottledError) {
+        this.o.logger.warn('pairing throttled by the platform');
+        return { ok: false, message: PAIRING_THROTTLED_MESSAGE };
       }
       if (hasErrorCode(err, 'errMsg_DeviceLimitReached')) {
         return { ok: false, message: 'En fazla 3 cihaz eşleştirilebilir. Önce web panelinden bir cihazı kaldırın.' };

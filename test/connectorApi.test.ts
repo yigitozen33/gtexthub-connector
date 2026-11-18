@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ConnectorApi, ConnectorApiError, DeviceRevokedError, PairingCodeInvalidError } from '../src/core/connectorApi';
+import {
+  ConnectorApi,
+  ConnectorApiError,
+  DeviceRevokedError,
+  PairingCodeInvalidError,
+  PairingThrottledError,
+} from '../src/core/connectorApi';
 import { NetworkError } from '../src/core/http';
 import { API_BASE, DEVICE, MockHttp, json, problem } from './helpers';
 
@@ -35,6 +41,15 @@ describe('pairing', () => {
     const http = new MockHttp().on('POST', /\/devicepairings$/, () => problem(404, 'errMsg_PairingCodeInvalid'));
     const api = new ConnectorApi(API_BASE, http.client, () => null);
     await expect(api.pair('ZZZZ-ZZZZ', 'PC', 'windows')).rejects.toBeInstanceOf(PairingCodeInvalidError);
+  });
+
+  it('treats 429 errMsg_PairingThrottled as a throttle, not as an invalid code', async () => {
+    const http = new MockHttp().on('POST', /\/devicepairings$/, () => problem(429, 'errMsg_PairingThrottled'));
+    const api = new ConnectorApi(API_BASE, http.client, () => null);
+    const err = await api.pair('ZZZZ-ZZZZ', 'PC', 'windows').catch((e) => e);
+    expect(err).toBeInstanceOf(PairingThrottledError);
+    expect(err).not.toBeInstanceOf(PairingCodeInvalidError);
+    expect(http.calls).toHaveLength(1); // no automatic retry
   });
 
   it('truncates the device name to 64 characters', async () => {

@@ -166,6 +166,16 @@ describe('ConnectorController', () => {
     expect(c.state().connection).toBe('unpaired');
   });
 
+  it('reports a throttled pairing door (429 errMsg_PairingThrottled) with its own message', async () => {
+    const http = serverMock().on('POST', /\/devicepairings$/, () => problem(429, 'errMsg_PairingThrottled'));
+    const c = makeController(http);
+    await c.init();
+    const r = await c.pair('abcd-efgh', 'pc');
+    expect(r).toEqual({ ok: false, message: 'Çok fazla deneme yapıldı, birkaç dakika sonra tekrar deneyin.' });
+    expect(http.callsTo('POST', /devicepairings/)).toHaveLength(1);
+    expect(c.state().connection).toBe('unpaired');
+  });
+
   it('refuses to pair without OS encryption', async () => {
     const http = serverMock();
     const c = makeController(http, { ...fakeEncryptor, isAvailable: async () => false });

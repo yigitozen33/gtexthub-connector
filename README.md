@@ -9,6 +9,8 @@ GTextHub platformuna yalnızca hesabın Discord kimliği, adı ve avatarı bildi
 1. **Eşleştirme.** Kullanıcı web panelindeki *Cihazlar* sayfasından tek kullanımlık, 10 dakika geçerli bir kod alır ve bağlayıcıya
    girer. Bağlayıcı `POST /devicepairings` ile kodu cihaz kimliği (`deviceId`) ve cihaz anahtarı (`deviceCredential`) ile değiştirir.
    Cihaz adı varsayılan olarak bilgisayarın adıdır, platform otomatik algılanır.
+   Çok sayıda başarısız denemeden sonra platform `429 errMsg_PairingThrottled` döner; bağlayıcı bunu ayrı bir hata olarak
+   gösterir ("Çok fazla deneme yapıldı, birkaç dakika sonra tekrar deneyin.") ve kendiliğinden yeniden denemez.
 2. **Nabız.** Her 30 saniyede `PATCH /connectorheartbeat`. Platform 2 dakika nabız almazsa cihazı çevrimdışı sayar.
 3. **İstek kuyruğu.** Her 3 saniyede `GET /devicerequests/pending` (gerçek zamanlı hub kurulmadı; cihaz yoklama yapar).
    Her istek kimliğine göre yalnızca bir kez işlenir (kalıcı günlük: yeniden başlatmada bile aynı mesaj iki kez gönderilmez).
@@ -54,6 +56,14 @@ kullanımı, aynı hata eşlemesi ve aynı Türkçe hata metni (ör. `İzin yok 
 - Token yalnızca Discord'a, cihaz anahtarı yalnızca bağlayıcı API başlıklarına (`x-device-id`, `x-device-credential`) gider.
   Pencereye hiçbir gizli bilgi geri gönderilmez.
 - Günlük dosyası `userData/logs/connector.log`; tüm satırlar gizli bilgi ayıklamasından geçer.
+- **Electron fuse'ları (yalnızca paketlenmiş uygulama).** `package.json` içindeki `build.electronFuses` ile electron-builder
+  paketleme sırasında şunları ayarlar: `RunAsNode` kapalı, `EnableNodeOptionsEnvironmentVariable` kapalı,
+  `EnableNodeCliInspectArguments` kapalı, `OnlyLoadAppFromAsar` açık, `EnableEmbeddedAsarIntegrityValidation` açık,
+  `EnableCookieEncryption` açık. Böylece kurulu uygulama `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` ya da `--inspect` ile başka kod
+  çalıştırmak için kullanılamaz ve yalnızca bütünlüğü doğrulanan `app.asar` yüklenir. Fuse değişikliği arm64 Electron ikili
+  dosyasının ad-hoc imzasını bozduğu için `resetAdHocDarwinSignature` ile imza yeniden (yine ad-hoc) atılır; kod imzalama
+  eklenmedi. `npm run dev` paketlenmemiş Electron ile çalışır ve etkilenmez. Kontrol:
+  `npx @electron/fuses read --app "<.app yolu>"`.
 - Hesap kaldırıldığında tokeni silinir (platforma yalnızca `discordUserId` bildirilir). "Eşleştirmeyi kaldır" cihazı platformda
   iptal eder ve tüm yerel durumu siler.
 
@@ -115,6 +125,11 @@ scripts/        esbuild derlemesi ve simge üretimi
   Apple Developer ID sertifikası, `hardenedRuntime` ve notarization (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`,
   `CSC_LINK`, `CSC_KEY_PASSWORD` gizli değişkenleri) eklenmeli. Windows'ta SmartScreen uyarısı çıkar: bir kod imzalama sertifikası
   (`WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`) gerekir.
+- **Fuse'lar ve imzasız derleme.** Fuse'lar yerelde macOS arm64 paketinde geri okunarak ve `codesign --verify --deep` ile
+  doğrulandı; Windows (NSIS) ve macOS x64 paketleri yalnızca sürüm iş akışında üretilir ve ilk sürümde ayrıca denenmeli.
+  Gerçek kod imzalama eklendiğinde `resetAdHocDarwinSignature` gereksiz kalır (electron-builder fuse'lardan sonra imzalar).
+- **Eşleştirme sınırlaması** (`429 errMsg_PairingThrottled`) bağlayıcıda sahte HTTP katmanıyla test edildi; arka uçtaki
+  sınırlama yayına alındığında önizleme arka ucuna karşı canlı olarak da denenmeli.
 - **Otomatik güncelleme yok.** Yeni sürüm elle kurulmalı.
 - **Web panelindeki indirme bağlantıları** `VITE_CONNECTOR_DOWNLOAD_MAC` / `VITE_CONNECTOR_DOWNLOAD_WIN` değişkenlerinden okunur;
   boşken bağlantılar gizlidir. İlk sürüm yayınlandığında bu değişkenler sürüm dosyalarının adresleriyle doldurulmalı.

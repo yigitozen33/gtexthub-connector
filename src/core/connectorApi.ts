@@ -93,6 +93,14 @@ export class PairingCodeInvalidError extends Error {
   }
 }
 
+/** Too many failed pairing attempts (429 `errMsg_PairingThrottled`): the door is closed for a few minutes. */
+export class PairingThrottledError extends Error {
+  constructor() {
+    super('pairing throttled');
+    this.name = 'PairingThrottledError';
+  }
+}
+
 /** Transport failure or a 5xx: the platform is unreachable right now. */
 export function isConnectivityError(err: unknown): boolean {
   return err instanceof NetworkError || (err instanceof ConnectorApiError && err.status >= 500);
@@ -163,6 +171,9 @@ export class ConnectorApi {
     } catch (err) {
       if (err instanceof ConnectorApiError && (err.status === 404 || hasErrorCode(err, 'errMsg_PairingCodeInvalid'))) {
         throw new PairingCodeInvalidError();
+      }
+      if (err instanceof ConnectorApiError && (err.status === 429 || hasErrorCode(err, 'errMsg_PairingThrottled'))) {
+        throw new PairingThrottledError();
       }
       throw err;
     }
