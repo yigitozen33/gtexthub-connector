@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GTextHub Bağlayıcı</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">G</span>
+        <div>
+          <h1 class="brand__name">GTextHub Bağlayıcı</h1>
+          <p class="brand__sub" id="device-line"></p>
+        </div>
+      </div>
+      <span class="pill" id="status-pill" role="status" aria-live="polite"></span>
+    </header>
+
+    <main class="content">
+      <div class="alert alert--warning" id="notice" hidden></div>
+      <div class="alert alert--danger" id="encryption-warning" hidden>
+        Bu bilgisayarda güvenli anahtar deposu (Anahtar Zinciri / DPAPI) kullanılamıyor. Eşleştirme ve hesap ekleme devre dışı.
+      </div>
+
+      <!-- Step 1: unpaired -->
+      <section class="card" id="view-pair" hidden>
+        <h2 class="card__title">Bu bilgisayarı eşleştirin</h2>
+        <ol class="steps">
+          <li>GTextHub web panelinde <strong>Cihazlar</strong> sayfasını açın.</li>
+          <li><strong>Eşleştirme kodu oluştur</strong> düğmesine basın.</li>
+          <li>Gösterilen kodu aşağıya girin. Kod 10 dakika geçerlidir ve tek kullanımlıktır.</li>
+        </ol>
+        <form id="pair-form" class="form" autocomplete="off" novalidate>
+          <label class="field">
+            <span class="field__label">Eşleştirme kodu</span>
+            <input id="pair-code" class="input input--code" type="text" placeholder="ABCD-EFGH" maxlength="20" spellcheck="false" required />
+          </label>
+          <label class="field">
+            <span class="field__label">Cihaz adı</span>
+            <input id="pair-name" class="input" type="text" maxlength="64" required />
+          </label>
+          <p class="muted small" id="pair-platform"></p>
+          <p class="form-error" id="pair-error" role="alert" hidden></p>
+          <button class="btn btn--primary" id="pair-submit" type="submit">Eşleştir</button>
+        </form>
+      </section>
+
+      <!-- Step 2: paired -->
+      <section id="view-main" hidden>
+        <div class="card">
+          <div class="row row--between">
+            <h2 class="card__title">Gönderim</h2>
+            <button class="btn btn--ghost" id="pause-toggle" type="button"></button>
+          </div>
+          <p class="muted small" id="pause-line"></p>
+        </div>
+
+        <div class="card">
+          <h2 class="card__title">Discord hesapları</h2>
+          <p class="muted small">
+            Tokenler yalnızca bu bilgisayarda, işletim sisteminin anahtar deposuyla şifreli saklanır. GTextHub'a token gönderilmez.
+          </p>
+          <ul class="accounts" id="accounts"></ul>
+          <p class="muted empty" id="accounts-empty" hidden>Bu bağlayıcıda henüz hesap yok.</p>
+        </div>
+
+        <div class="card">
+          <h2 class="card__title">Hesap ekle</h2>
+          <div class="alert alert--warning small">
+            Kendi Discord hesabınızın token'ı ile otomatik mesaj göndermek Discord'un Hizmet Şartları'na aykırı olabilir ve hesabınızın
+            kısıtlanmasına ya da kapatılmasına yol açabilir. Bu riski kabul ederek devam edersiniz.
+          </div>
+          <form id="add-form" class="form" autocomplete="off" novalidate>
+            <label class="field">
+              <span class="field__label">Discord tokeni</span>
+              <input id="add-token" class="input" type="password" spellcheck="false" placeholder="Tokeni buraya yapıştırın" required />
+            </label>
+            <label class="check">
+              <input id="add-tos" type="checkbox" />
+              <span>Discord Hizmet Şartları uyarısını okudum, riski kabul ediyorum.</span>
+            </label>
+            <p class="form-error" id="add-error" role="alert" hidden></p>
+            <p class="form-ok" id="add-ok" role="status" hidden></p>
+            <button class="btn btn--primary" id="add-submit" type="submit">Doğrula ve ekle</button>
+          </form>
+        </div>
+
+        <div class="card card--danger">
+          <h2 class="card__title">Eşleştirmeyi kaldır</h2>
+          <p class="muted small">
+            Bu bilgisayardaki cihaz kimliği, tüm tokenler ve gönderim geçmişi silinir. Cihazı web panelindeki Cihazlar sayfasından da kaldırın.
+          </p>
+          <button class="btn btn--danger" id="unpair" type="button">Eşleştirmeyi kaldır</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot muted small" id="footer"></footer>
+    <script src="renderer.js"></script>
+  </body>
+</html>
