@@ -417,6 +417,22 @@ body {
   font-weight: 600;
 }
 
+.account--expected {
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-accent);
+  color: var(--text-secondary);
+}
+
 .foot {
   padding: 8px 16px 14px;
   text-align: center;

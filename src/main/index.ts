@@ -95,6 +95,8 @@ function showWindow(): void {
   setDockVisible(true);
   win!.show();
   win!.focus();
+  // Fresh "accounts waiting for a token" whenever the window opens.
+  if (controller) controller.windowShown();
 }
 
 function createWindow(): void {
@@ -212,7 +214,13 @@ function registerIpc(): void {
   ipcMain.handle(IPC.getState, () => controller.state());
   ipcMain.handle(IPC.pair, guard((code: unknown, name: unknown) => controller.pair(str(code, 64), str(name, 64))));
   ipcMain.handle(IPC.unpair, guard(() => controller.unpair()));
-  ipcMain.handle(IPC.addAccount, guard((token: unknown) => controller.addAccount(str(token, 500))));
+  ipcMain.handle(
+    IPC.addAccount,
+    guard((token: unknown, expected: unknown) => {
+      const id = str(expected, 32);
+      return controller.addAccount(str(token, 500), /^\d{1,32}$/.test(id) ? id : null);
+    }),
+  );
   ipcMain.handle(IPC.removeAccount, guard((id: unknown) => controller.removeAccount(str(id, 32))));
   ipcMain.handle(IPC.setPaused, guard((p: unknown) => controller.setPaused(p === true)));
   ipcMain.handle(IPC.setAutoStart, guard((v: unknown) => controller.setAutoStart(v === true)));

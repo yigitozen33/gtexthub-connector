@@ -35,6 +35,27 @@ export interface GuildChannelsAnswer {
   channels: Array<{ channelId: string; discordChannelId: string; channelName: string }>;
 }
 
+/** One row of `GET /deviceexpectedaccounts`: a `connector`-path account the platform expects on a device. */
+export interface ExpectedAccount {
+  accountId: string;
+  discordUserId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: string | null;
+  disconnectReason: string | null;
+  /** false: bound to a revoked device or to none - a re-pair candidate. */
+  boundToThisDevice: boolean;
+}
+
+/** Why a guild-channel request is answered without a list. */
+export type GuildChannelsUnavailableReason = 'tokenMissing' | 'discordUnavailable';
+
+export interface AccountRemoval {
+  /** `released` (unbound from this device) or `notBound` (nothing to release); both are success. */
+  result: 'released' | 'notBound' | null;
+  accountId: string | null;
+}
+
 export interface AccountRegistration {
   /** `registered` (new), `recovered` (known, token valid) or `disconnected` (reported invalid). */
   result: string | null;
@@ -197,10 +218,12 @@ export class ConnectorApi {
   /** `PATCH /devicerequests/:deviceRequestId/sendresult`. */
   async reportSendResult(
     deviceRequestId: string,
-    result: { outcome: 'sent' | 'failed'; reason?: string | null; tokenRejected: boolean },
+    result: { outcome: 'sent' | 'failed'; reason?: string | null; tokenRejected: boolean; tokenMissing?: boolean },
   ): Promise<void> {
     const body: Record<string, unknown> = { outcome: result.outcome, tokenRejected: result.tokenRejected };
     if (result.outcome === 'failed') body.reason = (result.reason || 'Gönderilemedi').slice(0, 500);
+    // `tokenMissing: true` requires `outcome = failed` (else 400); sent only when set.
+    if (result.outcome === 'failed' && result.tokenMissing === true) body.tokenMissing = true;
     await this.call('PATCH', `/devicerequests/${encodeURIComponent(deviceRequestId)}/sendresult`, body, this.deviceHeaders());
   }
 
@@ -215,5 +238,75 @@ export class ConnectorApi {
       { guilds: answer.guilds, tokenRejected: answer.tokenRejected },
       this.deviceHeaders(),
     );
+  }
+
+  /**
+   * `PATCH /devicerequests/:deviceRequestId/guildchannels` with `{ unavailableReason }`
+   * and no `guilds`: the platform answers the user "list unavailable" at once
+   * instead of waiting out its 15 s.
+   */
+  async reportGuildChannelsUnavailable(deviceRequestId: string, reason: GuildChannelsUnavailableReason): Promise<void> {
+    await this.call(
+      'PATCH',
+      `/devicerequests/${encodeURIComponent(deviceRequestId)}/guildchannels`,
+      { unavailableReason: reason },
+      this.deviceHeaders(),
+    );
+  }
+
+  /**
+   * `GET /deviceexpectedaccounts` - the owner's `connector`-path accounts bound to
+   * this device, plus those bound to a revoked device or to none
+   * (`boundToThisDevice: false`).
+   */
+  async listExpectedAccounts(): Promise<ExpectedAccount[]> {
+    const data = (await this.call('GET', '/deviceexpectedaccounts', undefined, this.deviceHeaders())) as
+      | { accounts?: unknown }
+      | null;
+    const rows = Array.isArray(data?.accounts) ? (data!.accounts as unknown[]) : [];
+    const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+    const out: ExpectedAccount[] = [];
+    for (const raw of rows) {
+      const r = (raw ?? {}) as Record<string, unknown>;
+      const discordUserId = str(r.discordUserId);
+      if (!discordUserId) continue;
+      out.push({
+        accountId: str(r.accountId) ?? str(r.id) ?? '',
+        discordUserId,
+        displayName: (str(r.displayName) ?? discordUserId).slice(0, 100),
+        avatarUrl: str(r.avatarUrl),
+        status: str(r.status),
+        disconnectReason: str(r.disconnectReason),
+        boundToThisDevice: r.boundToThisDevice === true,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * `POST /connectoraccountremovals` - tells the platform this device no longer
+   * holds the account's token. `notBound` is a 200 too, so the device can always
+   * finish its local removal.
+   */
+  async removeAccount(discordUserId: string): Promise<AccountRemoval> {
+    const data = (await this.call(
+      'POST',
+      '/connectoraccountremovals',
+      { discordUserId: discordUserId.slice(0, 32) },
+      this.deviceHeaders(),
+    )) as { removal?: Record<string, unknown> | null } | null;
+    const r = (data?.removal ?? {}) as Record<string, unknown>;
+    return {
+      result: r.result === 'released' || r.result === 'notBound' ? r.result : null,
+      accountId: typeof r.accountId === 'string' ? r.accountId : null,
+    };
+  }
+
+  /** `PATCH /connectorselfrevoke` - revokes this device's own credential; every later device call answers 401. */
+  async revokeSelf(): Promise<{ id: string | null; revoked: boolean }> {
+    const data = (await this.call('PATCH', '/connectorselfrevoke', undefined, this.deviceHeaders())) as
+      | Record<string, unknown>
+      | null;
+    return { id: typeof data?.id === 'string' ? data.id : null, revoked: data?.revoked === true };
   }
 }

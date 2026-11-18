@@ -61,6 +61,15 @@
           <p class="muted small" id="pause-line"></p>
         </div>
 
+        <div class="card" id="expected-card" hidden>
+          <h2 class="card__title">Token bekleyen hesaplar</h2>
+          <p class="muted small">
+            GTextHub panelinde bu bağlayıcıdan gönderim yapacak şekilde ayarlanmış, ancak bu bilgisayarda tokeni olmayan hesaplar.
+            Token girilene kadar bu hesapların gönderimleri yapılamaz.
+          </p>
+          <ul class="accounts" id="expected-accounts"></ul>
+        </div>
+
         <div class="card">
           <h2 class="card__title">Discord hesapları</h2>
           <p class="muted small">
@@ -70,13 +79,17 @@
           <p class="muted empty" id="accounts-empty" hidden>Bu bağlayıcıda henüz hesap yok.</p>
         </div>
 
-        <div class="card">
+        <div class="card" id="add-card">
           <h2 class="card__title">Hesap ekle</h2>
           <div class="alert alert--warning small">
             Kendi Discord hesabınızın token'ı ile otomatik mesaj göndermek Discord'un Hizmet Şartları'na aykırı olabilir ve hesabınızın
             kısıtlanmasına ya da kapatılmasına yol açabilir. Bu riski kabul ederek devam edersiniz.
           </div>
           <form id="add-form" class="form" autocomplete="off" novalidate>
+            <div class="target" id="add-target" hidden>
+              <span class="small" id="add-target-label"></span>
+              <button class="btn btn--ghost btn--small" id="add-target-clear" type="button">Vazgeç</button>
+            </div>
             <label class="field">
               <span class="field__label">Discord tokeni</span>
               <input id="add-token" class="input" type="password" spellcheck="false" placeholder="Tokeni buraya yapıştırın" required />
@@ -94,7 +107,7 @@
         <div class="card card--danger">
           <h2 class="card__title">Eşleştirmeyi kaldır</h2>
           <p class="muted small">
-            Bu bilgisayardaki cihaz kimliği, tüm tokenler ve gönderim geçmişi silinir. Cihazı web panelindeki Cihazlar sayfasından da kaldırın.
+            Cihaz GTextHub panelinden de kaldırılır; bu bilgisayardaki cihaz kimliği, tüm tokenler ve gönderim geçmişi silinir.
           </p>
           <button class="btn btn--danger" id="unpair" type="button">Eşleştirmeyi kaldır</button>
         </div>

@@ -5,6 +5,7 @@
  */
 import {
   type AccountRegistration,
+  type AccountRemoval,
   type ConnectorApi,
   ConnectorApiError,
   DeviceRevokedError,
@@ -71,6 +72,15 @@ export type AddAccountResult =
   | { ok: true; account: AccountMeta; registration: AccountRegistration }
   | { ok: false; message: string; revoked?: boolean };
 
+/**
+ * How the platform took a removal: `released` / `notBound` (both success),
+ * `unreachable` (network or 5xx: removed locally only), `refused` (another 4xx,
+ * removed locally only), `revoked` (the device itself is gone).
+ */
+export type RemovalOutcome =
+  | { platform: 'released' | 'notBound'; accountId: string | null }
+  | { platform: 'unreachable' | 'refused' | 'revoked' };
+
 export class AccountService {
   constructor(
     private readonly api: ConnectorApi,
@@ -79,8 +89,13 @@ export class AccountService {
     private readonly logger: Logger = nullLogger,
   ) {}
 
-  /** Validates the token with Discord, reports the account, and only then stores the token. */
-  async add(rawToken: string): Promise<AddAccountResult> {
+  /**
+   * Validates the token with Discord, reports the account, and only then stores
+   * the token. `expectedDiscordUserId` (the token was entered for an account the
+   * platform expects here) refuses a token of another account before anything
+   * is reported.
+   */
+  async add(rawToken: string, expectedDiscordUserId?: string | null): Promise<AddAccountResult> {
     const token = normalizeToken(rawToken);
     if (token.length < 20 || /\s/.test(token)) return { ok: false, message: 'Bu bir Discord tokeni gibi görünmüyor.' };
 
@@ -91,6 +106,12 @@ export class AccountService {
       return { ok: false, message: `Token doğrulanamadı: ${r.detailedReason ?? r.reason ?? 'bilinmeyen hata'}` };
     }
     const user = check.user;
+    if (expectedDiscordUserId && user.discordUserId !== expectedDiscordUserId) {
+      return {
+        ok: false,
+        message: `Bu token seçilen hesaba değil, ${user.displayName} hesabına ait. Seçilen hesabın tokenini girin.`,
+      };
+    }
 
     let registration: AccountRegistration;
     try {
@@ -120,6 +141,41 @@ export class AccountService {
     await this.store.save(meta, token);
     this.logger.info('account added', { discordUserId: user.discordUserId, result: registration.result });
     return { ok: true, account: meta, registration };
+  }
+
+  /**
+   * Removes an account: first tells the platform (`POST /connectoraccountremovals`),
+   * then deletes the local token. The local removal never waits on the platform:
+   * a network failure or a refusal is logged and the token is deleted anyway.
+   * On revocation the token is deleted too; the caller wipes the rest.
+   */
+  async remove(discordUserId: string): Promise<RemovalOutcome> {
+    let outcome: RemovalOutcome;
+    try {
+      const r: AccountRemoval = await this.api.removeAccount(discordUserId);
+      outcome = { platform: r.result ?? 'notBound', accountId: r.accountId };
+      this.logger.info('account removal reported', { discordUserId, result: r.result, accountId: r.accountId });
+    } catch (err) {
+      if (err instanceof DeviceRevokedError) {
+        outcome = { platform: 'revoked' };
+      } else if (isConnectivityError(err)) {
+        outcome = { platform: 'unreachable' };
+        this.logger.warn('account removal not reported (platform unreachable); removing locally', {
+          discordUserId,
+          status: (err as ConnectorApiError).status,
+          error: err instanceof ConnectorApiError ? undefined : (err as Error).message,
+        });
+      } else {
+        outcome = { platform: 'refused' };
+        this.logger.warn('account removal refused by the platform; removing locally', {
+          discordUserId,
+          status: (err as ConnectorApiError)?.status,
+          errorCode: (err as ConnectorApiError)?.errorCode,
+        });
+      }
+    }
+    await this.store.remove(discordUserId);
+    return outcome;
   }
 
   /**

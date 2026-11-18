@@ -34,6 +34,21 @@ export interface UiAccount {
   lastResults: UiResult[];
 }
 
+/**
+ * An account the platform expects on this device but whose token this device
+ * does not hold (from `GET /deviceexpectedaccounts`). `boundToThisDevice: false`
+ * is an account of a previously paired device: a re-pair candidate.
+ */
+export interface UiExpectedAccount {
+  accountId: string;
+  discordUserId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: string | null;
+  disconnectReason: string | null;
+  boundToThisDevice: boolean;
+}
+
 export interface UiState {
   connection: UiConnection;
   /** Turkish status line: Çalışıyor / Bağlantı yok / Eşleştirilmedi (or Bağlanıyor…). */
@@ -44,6 +59,8 @@ export interface UiState {
   defaultDeviceName: string;
   platform: 'windows' | 'macos' | null;
   accounts: UiAccount[];
+  /** Accounts waiting for a token on this device ("Bu hesap için token girin"). */
+  expectedAccounts: UiExpectedAccount[];
   /** False when the OS keychain / DPAPI is unavailable; nothing secret can be stored then. */
   encryptionAvailable: boolean;
   /** A one-off notice, e.g. after a revocation. */
@@ -59,7 +76,8 @@ export interface ConnectorBridge {
   getState(): Promise<UiState>;
   pair(code: string, deviceName: string): Promise<ActionResult>;
   unpair(): Promise<ActionResult>;
-  addAccount(token: string): Promise<ActionResult>;
+  /** `expectedDiscordUserId`: the token is entered for that expected account. */
+  addAccount(token: string, expectedDiscordUserId?: string | null): Promise<ActionResult>;
   removeAccount(discordUserId: string): Promise<ActionResult>;
   setPaused(paused: boolean): Promise<ActionResult>;
   setAutoStart(enabled: boolean): Promise<ActionResult>;

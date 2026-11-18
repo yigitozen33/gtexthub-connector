@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConnectorApi, DeviceRevokedError, PairingCodeInvalidError } from '../src/core/connectorApi';
+import { ConnectorApi, ConnectorApiError, DeviceRevokedError, PairingCodeInvalidError } from '../src/core/connectorApi';
 import { NetworkError } from '../src/core/http';
 import { API_BASE, DEVICE, MockHttp, json, problem } from './helpers';
 
@@ -91,5 +91,109 @@ describe('device doors', () => {
     expect(http.calls[0].url).toBe(`${API_BASE}/devicerequests/r1/sendresult`);
     expect(http.calls[0].body).toEqual({ outcome: 'sent', tokenRejected: false });
     expect((http.calls[1].body as { reason: string }).reason).toHaveLength(500);
+  });
+});
+
+describe('R19 device doors', () => {
+  it('lists expected accounts with device headers and normalizes the rows', async () => {
+    const http = new MockHttp().on('GET', /\/deviceexpectedaccounts$/, () =>
+      json(200, {
+        accounts: [
+          {
+            accountId: 'acc-1',
+            discordUserId: '42',
+            displayName: 'neo',
+            avatarUrl: 'https://cdn.discordapp.com/avatars/42/a.png',
+            status: 'awaitingConnector',
+            disconnectReason: null,
+            boundToThisDevice: true,
+          },
+          { accountId: 'acc-2', discordUserId: '43', displayName: 'trinity', boundToThisDevice: false, status: 'disconnected', disconnectReason: 'device-revoked' },
+          { accountId: 'acc-3' }, // no discordUserId: dropped
+        ],
+      }),
+    );
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    const rows = await api.listExpectedAccounts();
+    expect(http.calls[0].url).toBe(`${API_BASE}/deviceexpectedaccounts`);
+    expect(http.calls[0].headers?.['x-device-id']).toBe(DEVICE.deviceId);
+    expect(http.calls[0].headers?.['x-device-credential']).toBe(DEVICE.deviceCredential);
+    expect(rows).toEqual([
+      {
+        accountId: 'acc-1',
+        discordUserId: '42',
+        displayName: 'neo',
+        avatarUrl: 'https://cdn.discordapp.com/avatars/42/a.png',
+        status: 'awaitingConnector',
+        disconnectReason: null,
+        boundToThisDevice: true,
+      },
+      {
+        accountId: 'acc-2',
+        discordUserId: '43',
+        displayName: 'trinity',
+        avatarUrl: null,
+        status: 'disconnected',
+        disconnectReason: 'device-revoked',
+        boundToThisDevice: false,
+      },
+    ]);
+  });
+
+  it('treats a missing accounts array as no expected accounts', async () => {
+    const http = new MockHttp().on('GET', /\/deviceexpectedaccounts$/, () => json(200, {}));
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    expect(await api.listExpectedAccounts()).toEqual([]);
+  });
+
+  it('reports an account removal with only the discordUserId', async () => {
+    const http = new MockHttp().on('POST', /\/connectoraccountremovals$/, () =>
+      json(200, { removal: { result: 'released', accountId: 'acc-1' } }),
+    );
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    expect(await api.removeAccount('42')).toEqual({ result: 'released', accountId: 'acc-1' });
+    expect(http.calls[0].url).toBe(`${API_BASE}/connectoraccountremovals`);
+    expect(http.calls[0].body).toEqual({ discordUserId: '42' });
+    expect(http.calls[0].headers?.['x-device-credential']).toBe(DEVICE.deviceCredential);
+  });
+
+  it('revokes itself with PATCH /connectorselfrevoke', async () => {
+    const http = new MockHttp().on('PATCH', /\/connectorselfrevoke$/, () => json(200, { id: 'dev-1', revoked: true }));
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    expect(await api.revokeSelf()).toEqual({ id: 'dev-1', revoked: true });
+    expect(http.calls[0].body).toBeUndefined();
+    expect(http.calls[0].headers?.['x-device-id']).toBe(DEVICE.deviceId);
+  });
+
+  it('maps a self-revoke 401 to DeviceRevokedError and a 404 to ConnectorApiError', async () => {
+    const http = new MockHttp().on('PATCH', /\/connectorselfrevoke$/, () => problem(401, 'errMsg_DeviceCredentialInvalid'));
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    await expect(api.revokeSelf()).rejects.toBeInstanceOf(DeviceRevokedError);
+    http.on('PATCH', /\/connectorselfrevoke$/, () => json(404, { status: 404 }));
+    await expect(api.revokeSelf()).rejects.toBeInstanceOf(ConnectorApiError);
+  });
+
+  it('answers a guild-channel request as unavailable without guilds', async () => {
+    const http = new MockHttp().on('PATCH', /\/guildchannels$/, () => json(200, {}));
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    await api.reportGuildChannelsUnavailable('g1', 'tokenMissing');
+    await api.reportGuildChannelsUnavailable('g2', 'discordUnavailable');
+    expect(http.calls[0].url).toBe(`${API_BASE}/devicerequests/g1/guildchannels`);
+    expect(http.calls[0].body).toEqual({ unavailableReason: 'tokenMissing' });
+    expect(http.calls[1].body).toEqual({ unavailableReason: 'discordUnavailable' });
+  });
+
+  it('sends tokenMissing only on a failed result', async () => {
+    const http = new MockHttp().on('PATCH', /\/sendresult$/, () => json(200, {}));
+    const api = new ConnectorApi(API_BASE, http.client, () => DEVICE);
+    await api.reportSendResult('r1', { outcome: 'failed', reason: 'Bağlayıcıda bu hesabın tokeni yok', tokenRejected: false, tokenMissing: true });
+    await api.reportSendResult('r2', { outcome: 'sent', tokenRejected: false, tokenMissing: true });
+    expect(http.calls[0].body).toEqual({
+      outcome: 'failed',
+      reason: 'Bağlayıcıda bu hesabın tokeni yok',
+      tokenRejected: false,
+      tokenMissing: true,
+    });
+    expect(http.calls[1].body).toEqual({ outcome: 'sent', tokenRejected: false });
   });
 });

@@ -12,11 +12,30 @@ GTextHub platformuna yalnızca hesabın Discord kimliği, adı ve avatarı bildi
 2. **Nabız.** Her 30 saniyede `PATCH /connectorheartbeat`. Platform 2 dakika nabız almazsa cihazı çevrimdışı sayar.
 3. **İstek kuyruğu.** Her 3 saniyede `GET /devicerequests/pending` (gerçek zamanlı hub kurulmadı; cihaz yoklama yapar).
    Her istek kimliğine göre yalnızca bir kez işlenir (kalıcı günlük: yeniden başlatmada bile aynı mesaj iki kez gönderilmez).
-   - `handOff`: mesaj Discord'a gönderilir, sonuç `PATCH /devicerequests/:id/sendresult` ile bildirilir.
+   - `handOff`: mesaj Discord'a gönderilir, sonuç `PATCH /devicerequests/:id/sendresult` ile bildirilir. Bağlayıcıda o
+     `discordUserId` için token yoksa Discord çağrılmaz; yanıt `{ outcome: 'failed', reason: 'Bağlayıcıda bu hesabın tokeni yok',
+     tokenMissing: true }` olur (gönderim duraklatılmış olsa bile).
    - `guildChannels`: sunucular ve metin kanalları listelenir, 15 saniye içinde `PATCH /devicerequests/:id/guildchannels` ile yanıtlanır.
-4. **Hesap ekleme.** Token önce yerelde Discord'a (`GET /users/@me`) doğrulatılır, sonra yalnızca hesap bilgisi
-   `POST /connectoraccountreports` ile bildirilir. Platform kabul ederse token şifreli olarak saklanır.
-5. **İptal.** Herhangi bir çağrı `401 errMsg_DeviceCredentialInvalid` dönerse cihaz web panelinden kaldırılmış demektir:
+     Liste alınamıyorsa platformun 15 saniyesi beklenmez, hemen `{ unavailableReason }` (`guilds` olmadan) gönderilir:
+     token yoksa `tokenMissing`, Discord'a ulaşılamıyorsa (ağ hatası, 5xx, hız sınırı) `discordUnavailable`. Discord tokeni
+     reddederse (401) yanıt eskisi gibi `{ guilds: [], tokenRejected: true }` olur.
+4. **Beklenen hesaplar.** `GET /deviceexpectedaccounts` eşleştirmeden sonra (her bağlantı kuruluşunda), pencere açıldığında,
+   hesap eklenip kaldırıldığında ve çevrimiçiyken her 60 saniyede çağrılır. Yanıt, platformun bu cihazdan gönderim yapmasını
+   beklediği `connector` yollu hesaplardır (`boundToThisDevice: true`) ve artık canlı olmayan bir cihaza bağlı ya da hiçbir cihaza
+   bağlı olmayan hesaplardır (`boundToThisDevice: false`, yeniden eşleştirme adayları). Pencerede, bu bilgisayarda tokeni olmayan
+   hesaplar "Token bekleyen hesaplar" kartında listelenir ("Bu hesap için token girin" / "Önceki bir cihazdan") ve **Token ekle**
+   ile olağan hesap ekleme formu o hesaba hedeflenir. Girilen token başka bir hesaba aitse platforma hiçbir şey bildirilmeden reddedilir.
+5. **Hesap ekleme.** Token önce yerelde Discord'a (`GET /users/@me`) doğrulatılır, sonra yalnızca hesap bilgisi
+   `POST /connectoraccountreports` ile bildirilir. Platform kabul ederse token şifreli olarak saklanır. Önceki (kaldırılmış) bir
+   cihaza bağlı hesap bu çağrıyla bu cihaza yeniden bağlanır.
+6. **Hesap kaldırma.** Önce `POST /connectoraccountremovals` `{ discordUserId }` çağrılır (yanıt
+   `{ removal: { result: 'released' | 'notBound', accountId } }`; ikisi de başarı), sonra token yerelde silinir. Sunucuya
+   ulaşılamazsa ya da istek reddedilirse token yine silinir, durum günlüğe yazılır ve kullanıcıya hesabın panelde hâlâ bağlı
+   görünebileceği söylenir.
+7. **Eşleştirmeyi kaldırma.** Önce `PATCH /connectorselfrevoke` (yanıt `{ id, revoked }`) ile cihaz platformda iptal edilir, sonra
+   tüm yerel durum silinir. `401` "zaten iptal edilmiş" sayılır (başarı). Ağ hatasında (ya da başka bir hatada) yerel durum yine silinir ve pencerede cihazın
+   web panelindeki Cihazlar sayfasından da kaldırılması gerekebileceği gösterilir.
+8. **İptal.** Herhangi bir çağrı `401 errMsg_DeviceCredentialInvalid` dönerse cihaz web panelinden kaldırılmış demektir:
    bağlayıcı durur, yerel anahtarı ve tokenleri siler ve yeniden eşleştirme ister.
 
 Mesaj gecikmesi, yasaklı kelimeler ve lisans kontrolleri platformda, gönderim bağlayıcıya verilmeden önce yapılır.
@@ -33,7 +52,8 @@ kullanımı, aynı hata eşlemesi ve aynı Türkçe hata metni (ör. `İzin yok 
 - Token yalnızca Discord'a, cihaz anahtarı yalnızca bağlayıcı API başlıklarına (`x-device-id`, `x-device-credential`) gider.
   Pencereye hiçbir gizli bilgi geri gönderilmez.
 - Günlük dosyası `userData/logs/connector.log`; tüm satırlar gizli bilgi ayıklamasından geçer.
-- Hesap kaldırıldığında tokeni silinir. "Eşleştirmeyi kaldır" tüm yerel durumu siler.
+- Hesap kaldırıldığında tokeni silinir (platforma yalnızca `discordUserId` bildirilir). "Eşleştirmeyi kaldır" cihazı platformda
+  iptal eder ve tüm yerel durumu siler.
 
 ## Geliştirme
 
@@ -92,14 +112,12 @@ scripts/        esbuild derlemesi ve simge üretimi
   (`WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`) gerekir.
 - **Otomatik güncelleme yok.** Yeni sürüm elle kurulmalı.
 - **Web panelindeki indirme bağlantıları** henüz yok (Cihazlar sayfası "yakında" diyor); yayınlanan sürüm dosyalarına bağlanmalı.
-- **Arka uç eksikleri** (bağlayıcıdan çözülemeyen):
-  - Cihazın, platformun bu cihaza bağlı beklediği hesapları öğrenebileceği bir API yok. Web panelinde yolu "bağlayıcı" yapılan bir
-    hesap, kullanıcı tokeni bu bağlayıcıya girene kadar "Bağlayıcı bekleniyor" durumunda kalır.
-  - Bağlayıcıdan hesap kaldırmak platforma bildirilemez (yalnızca `tokenValid: false` bildirimi var ve bu, hesabı "token reddedildi"
-    olarak işaretler). Kullanıcı hesabı web panelinden de silmelidir.
-  - "Eşleştirmeyi kaldır" için cihaz tarafında bir API yok; cihaz web panelinden de kaldırılmalıdır.
-  - Kanal listesi alan adı: bağlayıcı spesifikasyonu `channelId` derken web istemcisi ve platform yolu `discordChannelId` okuyor.
-    Bağlayıcı her iki alanı da gönderir.
+- **Kanal listesi alan adı:** bağlayıcı spesifikasyonu `channelId` derken web istemcisi ve platform yolu `discordChannelId` okuyor.
+  Bağlayıcı her iki alanı da gönderir.
+- **R19 cihaz API'leri** (`GET /deviceexpectedaccounts`, `POST /connectoraccountremovals`, `PATCH /connectorselfrevoke`,
+  `tokenMissing`, `unavailableReason`) bağlayıcıda sözleşmeye göre uygulandı ve sahte HTTP katmanıyla test edildi; önizleme
+  arka ucuna karşı canlı doğrulama henüz yapılmadı. Bu API'ler yoksa (ör. eski arka uç, `404`) bağlayıcı çalışmaya devam eder:
+  beklenen hesap listesi boş kalır, kaldırma ve eşleştirmeyi kaldırma yerelde tamamlanır.
 - Discord istekleri platform modülüyle aynı `User-Agent` dizesini gönderir (`src/core/discord.ts`, `PLATFORM_USER_AGENT`).
   Platform modülü değişirse burası da güncellenmeli.
 - Linux desteklenmez (platform alanı yalnızca `windows` ve `macos` kabul eder).

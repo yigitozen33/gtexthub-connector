@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AccountService, normalizeToken } from '../src/core/accounts';
 import { Redactor } from '../src/core/logger';
+import { NetworkError } from '../src/core/http';
 import { MemoryStore, MockHttp, TOKEN, account, json, makeClients, problem } from './helpers';
 
 const ME = /\/users\/@me$/;
@@ -48,6 +49,78 @@ describe('adding an account', () => {
     http.on('POST', REPORT, () => problem(401, 'errMsg_DeviceCredentialInvalid'));
     const r = await svc.add(TOKEN);
     expect(r).toMatchObject({ ok: false, revoked: true });
+  });
+});
+
+describe('adding a token for an expected account', () => {
+  it('stores the token when it belongs to the expected account (re-bind via the usual report)', async () => {
+    const { http, store, svc } = setup();
+    http.on('POST', REPORT, () => json(200, { registration: { result: 'recovered', accountId: 'acc-9' } }));
+    const r = await svc.add(TOKEN, '42');
+    expect(r).toMatchObject({ ok: true, registration: { result: 'recovered', accountId: 'acc-9' } });
+    expect(store.tokens.get('42')).toBe(TOKEN);
+    expect(http.callsTo('POST', REPORT)[0].body).toEqual({ discordUserId: '42', discordUsername: 'neo', tokenValid: true });
+  });
+
+  it('refuses a token of another account before reporting anything', async () => {
+    const { http, store, svc } = setup();
+    const r = await svc.add(TOKEN, '77');
+    expect(r).toEqual({ ok: false, message: expect.stringContaining('neo hesabına ait') });
+    expect(http.callsTo('POST', REPORT)).toHaveLength(0);
+    expect(store.tokens.size).toBe(0);
+  });
+});
+
+describe('removing an account', () => {
+  const REMOVAL = /\/connectoraccountremovals$/;
+
+  it('tells the platform first, then deletes the token', async () => {
+    const { http, store, svc } = setup();
+    await store.save(account('42'), TOKEN);
+    let tokenAtCall: string | undefined;
+    http.on('POST', REMOVAL, () => {
+      tokenAtCall = store.tokens.get('42');
+      return json(200, { removal: { result: 'released', accountId: 'acc-7' } });
+    });
+    const out = await svc.remove('42');
+    expect(out).toEqual({ platform: 'released', accountId: 'acc-7' });
+    expect(tokenAtCall).toBe(TOKEN); // the platform was told before the local delete
+    expect(http.callsTo('POST', REMOVAL)[0].body).toEqual({ discordUserId: '42' });
+    expect(JSON.stringify(http.calls)).not.toContain(TOKEN);
+    expect(store.tokens.has('42')).toBe(false);
+    expect(store.accounts.has('42')).toBe(false);
+  });
+
+  it('treats notBound as success', async () => {
+    const { http, store, svc } = setup();
+    await store.save(account('42'), TOKEN);
+    http.on('POST', REMOVAL, () => json(200, { removal: { result: 'notBound', accountId: null } }));
+    expect(await svc.remove('42')).toEqual({ platform: 'notBound', accountId: null });
+    expect(store.tokens.has('42')).toBe(false);
+  });
+
+  it('still deletes locally when the platform is unreachable', async () => {
+    const { http, store, svc } = setup();
+    await store.save(account('42'), TOKEN);
+    http.on('POST', REMOVAL, () => new NetworkError('ENOTFOUND', false));
+    expect(await svc.remove('42')).toEqual({ platform: 'unreachable' });
+    expect(store.tokens.has('42')).toBe(false);
+  });
+
+  it('still deletes locally when the platform refuses', async () => {
+    const { http, store, svc } = setup();
+    await store.save(account('42'), TOKEN);
+    http.on('POST', REMOVAL, () => json(404, { status: 404 }));
+    expect(await svc.remove('42')).toEqual({ platform: 'refused' });
+    expect(store.tokens.has('42')).toBe(false);
+  });
+
+  it('signals revocation and still deletes the token', async () => {
+    const { http, store, svc } = setup();
+    await store.save(account('42'), TOKEN);
+    http.on('POST', REMOVAL, () => problem(401, 'errMsg_DeviceCredentialInvalid'));
+    expect(await svc.remove('42')).toEqual({ platform: 'revoked' });
+    expect(store.tokens.has('42')).toBe(false);
   });
 });
 

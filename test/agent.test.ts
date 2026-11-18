@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DeviceAgent, PAUSED_REASON, type AgentStatus } from '../src/core/agent';
+import { DeviceAgent, PAUSED_REASON, TOKEN_MISSING_REASON, type AgentStatus } from '../src/core/agent';
+import type { ExpectedAccount } from '../src/core/connectorApi';
 import { NetworkError } from '../src/core/http';
 import { RequestJournal, type JournalEntry } from '../src/core/journal';
 import { DISCORD_BASE, MemoryStore, MockHttp, TOKEN, account, json, makeClients, problem } from './helpers';
@@ -9,6 +10,17 @@ const PENDING = /\/devicerequests\/pending$/;
 const SENDRESULT = /\/devicerequests\/([^/]+)\/sendresult$/;
 const GUILDRESULT = /\/devicerequests\/([^/]+)\/guildchannels$/;
 const DISCORD_SEND = /discord\.test\/api\/v10\/channels\/(\d+)\/messages$/;
+const EXPECTED = /\/deviceexpectedaccounts$/;
+
+const EXPECTED_ROW = {
+  accountId: 'acc-5',
+  discordUserId: '555',
+  displayName: 'beklenen',
+  avatarUrl: null,
+  status: 'awaitingConnector',
+  disconnectReason: null,
+  boundToThisDevice: true,
+};
 
 function handOff(id: string, discordUserId = '111', channel = '999', text = 'merhaba') {
   return {
@@ -29,18 +41,20 @@ function setup(opts: { pending?: () => unknown[]; paused?: boolean; journal?: Re
     .on('GET', PENDING, () => json(200, { data: pending(), paging: { page: 1 } }))
     .on('PATCH', SENDRESULT, () => json(200, { id: 'x', status: 'answered' }))
     .on('PATCH', GUILDRESULT, () => json(200, { id: 'x', status: 'answered' }))
-    .on('POST', DISCORD_SEND, () => json(200, { id: 'm1' }));
+    .on('POST', DISCORD_SEND, () => json(200, { id: 'm1' }))
+    .on('GET', EXPECTED, () => json(200, { accounts: [EXPECTED_ROW] }));
   const { api, discord } = makeClients(http);
   const store = new MemoryStore();
   const statuses: AgentStatus[] = [];
   const revoked = vi.fn();
+  const expected: ExpectedAccount[][] = [];
   const agent = new DeviceAgent({
     api,
     discord,
     store,
     journal: opts.journal,
     isPaused: () => !!opts.paused,
-    hooks: { onStatus: (s) => statuses.push(s), onRevoked: revoked },
+    hooks: { onStatus: (s) => statuses.push(s), onRevoked: revoked, onExpectedAccounts: (a) => expected.push(a) },
   });
   return {
     http,
@@ -48,6 +62,7 @@ function setup(opts: { pending?: () => unknown[]; paused?: boolean; journal?: Re
     agent,
     statuses,
     revoked,
+    expected,
     setPending: (fn: () => unknown[]) => {
       pending = fn;
     },
@@ -238,16 +253,62 @@ describe('hand-off', () => {
     agent.stop();
   });
 
-  it('reports `failed` without calling Discord when the account is not held here', async () => {
-    const { http, agent } = setup({ pending: () => [handOff('r4', '222')] });
+  it('answers `failed` with tokenMissing, without calling Discord, when the account is not held here', async () => {
+    const { http, agent, store } = setup({ pending: () => [handOff('r4', '222')] });
+    await store.save(account('111'), TOKEN); // another account is held; not this one
     agent.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(http.callsTo('POST', DISCORD_SEND)).toHaveLength(0);
-    expect(http.callsTo('PATCH', SENDRESULT)[0].body).toEqual({
+    const report = http.callsTo('PATCH', SENDRESULT);
+    expect(report).toHaveLength(1);
+    expect(report[0].url).toMatch(/\/devicerequests\/r4\/sendresult$/);
+    expect(report[0].body).toEqual({
       outcome: 'failed',
-      reason: 'Hesabın tokeni yok',
+      reason: 'Bağlayıcıda bu hesabın tokeni yok',
       tokenRejected: false,
+      tokenMissing: true,
     });
+    expect(TOKEN_MISSING_REASON).toBe('Bağlayıcıda bu hesabın tokeni yok');
+    agent.stop();
+  });
+
+  it('answers tokenMissing even while paused (the token, not the pause, is the cause)', async () => {
+    const { http, agent } = setup({ pending: () => [handOff('r4p', '222')], paused: true });
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.callsTo('PATCH', SENDRESULT)[0].body).toMatchObject({ outcome: 'failed', tokenMissing: true });
+    agent.stop();
+  });
+
+  it('re-reports a tokenMissing result after a restart with the flag kept', async () => {
+    let saved: JournalEntry[] = [];
+    const persistence = { read: () => saved, write: (e: JournalEntry[]) => (saved = JSON.parse(JSON.stringify(e))) };
+    const first = setup({ pending: () => [handOff('r4r', '222')], journal: new RequestJournal(persistence) });
+    first.http.on('PATCH', SENDRESULT, () => new NetworkError('ECONNRESET', false));
+    first.agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    first.agent.stop();
+    expect(saved[0]).toMatchObject({ id: 'r4r', reported: false, result: { tokenMissing: true } });
+
+    const second = setup({ journal: new RequestJournal(persistence) });
+    second.agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.http.callsTo('PATCH', SENDRESULT)[0].body).toEqual({
+      outcome: 'failed',
+      reason: TOKEN_MISSING_REASON,
+      tokenRejected: false,
+      tokenMissing: true,
+    });
+    second.agent.stop();
+  });
+
+  it('never sends tokenMissing on a Discord failure of a held token', async () => {
+    const { http, agent, store } = setup({ pending: () => [handOff('r4d')] });
+    http.on('POST', DISCORD_SEND, () => json(404, { message: 'Unknown Channel', code: 10003 }));
+    await store.save(account('111'), TOKEN);
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.callsTo('PATCH', SENDRESULT)[0].body).not.toHaveProperty('tokenMissing');
     agent.stop();
   });
 
@@ -386,11 +447,109 @@ describe('guild channels', () => {
     agent.stop();
   });
 
-  it('does not answer for an account it does not hold', async () => {
+  it('answers unavailableReason tokenMissing at once for an account it does not hold', async () => {
     const { http, agent } = setup({ pending: () => [request] });
     agent.start();
-    await vi.advanceTimersByTimeAsync(6_000);
-    expect(http.callsTo('PATCH', GUILDRESULT)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(0);
+    const answer = http.callsTo('PATCH', GUILDRESULT);
+    expect(answer).toHaveLength(1);
+    expect(answer[0].url).toMatch(/\/devicerequests\/g1\/guildchannels$/);
+    expect(answer[0].body).toEqual({ unavailableReason: 'tokenMissing' });
+    expect(http.callsTo('GET', GUILDS)).toHaveLength(0);
     agent.stop();
+  });
+
+  it('answers discordUnavailable when Discord cannot be reached', async () => {
+    const { http, agent, store } = setup({ pending: () => [request] });
+    http.on('GET', GUILDS, () => new NetworkError('ENOTFOUND', false));
+    await store.save(account('111'), TOKEN);
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const answer = http.callsTo('PATCH', GUILDRESULT);
+    expect(answer).toHaveLength(1);
+    expect(answer[0].body).toEqual({ unavailableReason: 'discordUnavailable' });
+    expect(store.accounts.get('111')?.status).toBe('active');
+    agent.stop();
+  });
+
+  it('answers discordUnavailable on a Discord 5xx', async () => {
+    const { http, agent, store } = setup({ pending: () => [request] });
+    http.on('GET', GUILDS, () => json(502, { message: 'Bad Gateway' }));
+    await store.save(account('111'), TOKEN);
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.callsTo('PATCH', GUILDRESULT)[0].body).toEqual({ unavailableReason: 'discordUnavailable' });
+    agent.stop();
+  });
+
+  it('retries an unavailable answer through a short platform outage', async () => {
+    const { http, agent } = setup({ pending: () => [request] });
+    let down = true;
+    http.on('PATCH', GUILDRESULT, () => (down ? new NetworkError('ECONNRESET', false) : json(200, {})));
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    down = false;
+    await vi.advanceTimersByTimeAsync(2_000);
+    const answer = http.callsTo('PATCH', GUILDRESULT);
+    expect(answer).toHaveLength(2);
+    expect(answer[1].body).toEqual({ unavailableReason: 'tokenMissing' });
+    agent.stop();
+  });
+});
+
+describe('expected accounts', () => {
+  it('fetches on connect and every 60 s while online, with device headers', async () => {
+    const { http, agent, expected } = setup();
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(1);
+    expect(http.callsTo('GET', EXPECTED)[0].headers?.['x-device-id']).toBe('dev-1');
+    expect(expected).toHaveLength(1);
+    expect(expected[0]).toEqual([EXPECTED_ROW]);
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(3);
+    agent.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(3);
+  });
+
+  it('fetches on demand only while online and coalesces concurrent calls', async () => {
+    const { http, agent } = setup();
+    await agent.refreshExpectedAccounts(); // stopped: no call
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(0);
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const n = http.callsTo('GET', EXPECTED).length;
+    await Promise.all([agent.refreshExpectedAccounts(), agent.refreshExpectedAccounts()]);
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(n + 1);
+    agent.stop();
+  });
+
+  it('keeps the cadence when the call fails, and stays online', async () => {
+    const { http, agent, expected } = setup();
+    http.on('GET', EXPECTED, () => new NetworkError('ECONNRESET', false));
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agent.status).toBe('online');
+    expect(expected).toHaveLength(0);
+    http.on('GET', EXPECTED, () => json(404, { status: 404 }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(agent.status).toBe('online');
+    expect(http.callsTo('GET', EXPECTED)).toHaveLength(2);
+    agent.stop();
+  });
+
+  it('revokes on 401 errMsg_DeviceCredentialInvalid', async () => {
+    const { http, agent, revoked } = setup();
+    http.on('GET', EXPECTED, () => problem(401, 'errMsg_DeviceCredentialInvalid'));
+    agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agent.status).toBe('revoked');
+    expect(revoked).toHaveBeenCalledTimes(1);
   });
 });

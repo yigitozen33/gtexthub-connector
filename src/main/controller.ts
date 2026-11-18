@@ -7,8 +7,10 @@ import { AccountService } from '../core/accounts';
 import { type AgentStatus, DeviceAgent } from '../core/agent';
 import {
   ConnectorApi,
+  ConnectorApiError,
   DeviceRevokedError,
   type DevicePlatform,
+  type ExpectedAccount,
   PairingCodeInvalidError,
   hasErrorCode,
   isConnectivityError,
@@ -17,7 +19,7 @@ import { DiscordClient } from '../core/discord';
 import { type HttpClient, fetchHttpClient } from '../core/http';
 import { RequestJournal } from '../core/journal';
 import type { Logger, Redactor } from '../core/logger';
-import type { ActionResult, UiConnection, UiState } from '../shared/ipc';
+import type { ActionResult, UiConnection, UiExpectedAccount, UiState } from '../shared/ipc';
 import {
   EncryptionUnavailableError,
   type Encryptor,
@@ -52,6 +54,9 @@ const STATUS_LABELS: Record<UiConnection, string> = {
 
 const REVOKED_NOTICE =
   'Bu cihazın eşleştirmesi kaldırılmış. Yerel veriler silindi; devam etmek için web panelinden yeni bir eşleştirme kodu alın.';
+const UNPAIR_UNREACHABLE_NOTICE =
+  'Eşleştirme bu bilgisayarda kaldırıldı ve yerel veriler silindi, ancak GTextHub sunucusuna ulaşılamadı. ' +
+  'Cihaz panelde hâlâ görünüyorsa web panelindeki Cihazlar sayfasından da kaldırın.';
 const ENCRYPTION_MESSAGE =
   'Bu bilgisayarda güvenli anahtar deposu (Anahtar Zinciri / DPAPI) kullanılamıyor; gizli bilgiler kaydedilemez.';
 
@@ -65,6 +70,8 @@ export class ConnectorController extends EventEmitter {
   private agent: DeviceAgent | null = null;
   private agentStatus: AgentStatus = 'stopped';
   private notice: string | null = null;
+  /** The last `GET /deviceexpectedaccounts` answer (memory only; never secret). */
+  private expected: ExpectedAccount[] = [];
 
   constructor(private readonly o: ControllerOptions) {
     super();
@@ -125,6 +132,7 @@ export class ConnectorController extends EventEmitter {
       device: this.isPaired ? this.stateFile.state.device : null,
       defaultDeviceName: this.o.defaultDeviceName,
       platform: this.o.platform,
+      expectedAccounts: this.isPaired ? this.expectedWithoutToken() : [],
       accounts: this.stateFile.state.accounts.map((a) => ({
         discordUserId: a.discordUserId,
         displayName: a.displayName,
@@ -144,6 +152,32 @@ export class ConnectorController extends EventEmitter {
       version: this.o.version,
       environment: this.o.environment,
     };
+  }
+
+  /** Expected accounts whose token this device does not hold. */
+  private expectedWithoutToken(): UiExpectedAccount[] {
+    const held = new Set(this.stateFile.state.accounts.map((a) => a.discordUserId));
+    return this.expected
+      .filter((e) => !held.has(e.discordUserId))
+      .map((e) => ({
+        accountId: e.accountId,
+        discordUserId: e.discordUserId,
+        displayName: e.displayName,
+        avatarUrl: e.avatarUrl,
+        status: e.status,
+        disconnectReason: e.disconnectReason,
+        boundToThisDevice: e.boundToThisDevice,
+      }));
+  }
+
+  /** Re-fetches the expected accounts (window opened, account added or removed). */
+  async refreshExpectedAccounts(): Promise<void> {
+    await this.agent?.refreshExpectedAccounts();
+  }
+
+  /** The window was opened or brought to front. */
+  windowShown(): void {
+    void this.refreshExpectedAccounts();
   }
 
   private startAgent(): void {
@@ -166,9 +200,15 @@ export class ConnectorController extends EventEmitter {
           if (this.agent === agent) void this.handleRevoked();
         },
         onOnline: (first) => {
-          if (first) void this.revalidateAccounts();
+          // Re-validation may re-bind accounts; fetch the expected list again after it.
+          if (first) void this.revalidateAccounts().then(() => this.refreshExpectedAccounts());
         },
         onRequestHandled: () => this.changed(),
+        onExpectedAccounts: (accounts) => {
+          if (this.agent !== agent) return;
+          this.expected = accounts;
+          this.changed();
+        },
       },
     });
     this.agent = agent;
@@ -188,6 +228,7 @@ export class ConnectorController extends EventEmitter {
     this.agent?.stop();
     this.agent = null;
     this.agentStatus = 'stopped';
+    this.expected = [];
     await this.vault.wipe();
     this.stateFile.reset();
     removeJournal(this.o.dataDir);
@@ -239,23 +280,56 @@ export class ConnectorController extends EventEmitter {
     }
   }
 
+  /**
+   * "Eşleştirmeyi kaldır": revokes this device on the platform
+   * (`PATCH /connectorselfrevoke`), then wipes local state. A 401 there means
+   * already revoked: success. Any other failure (network, 5xx, another 4xx) still
+   * wipes, and the window tells the user the device may need removing on the
+   * web panel.
+   */
   async unpair(): Promise<ActionResult> {
+    if (!this.isPaired) {
+      await this.wipeLocal();
+      this.changed();
+      return { ok: true, message: 'Eşleştirme kaldırıldı ve yerel veriler silindi.' };
+    }
+    // Stop the loop first: a 401 it sees after the revoke must not race this wipe.
+    this.agent?.stop();
+    let platformDone = true;
+    try {
+      await this.api.revokeSelf();
+      this.o.logger.info('device revoked on the platform by the user');
+    } catch (err) {
+      if (err instanceof DeviceRevokedError || (err instanceof ConnectorApiError && err.status === 401)) {
+        this.o.logger.info('device already revoked on the platform');
+      } else {
+        platformDone = false;
+        this.o.logger.warn('device revoke not delivered; wiping locally anyway', {
+          status: (err as ConnectorApiError)?.status,
+          errorCode: (err as ConnectorApiError)?.errorCode,
+          error: err instanceof ConnectorApiError ? undefined : (err as Error)?.message,
+        });
+      }
+    }
     this.o.logger.info('unpaired by the user; wiping local state');
     await this.wipeLocal();
-    this.notice = null;
+    this.notice = platformDone ? null : UNPAIR_UNREACHABLE_NOTICE;
     this.changed();
-    return { ok: true, message: 'Eşleştirme kaldırıldı ve yerel veriler silindi.' };
+    return platformDone
+      ? { ok: true, message: 'Eşleştirme kaldırıldı: cihaz GTextHub panelinden de kaldırıldı ve yerel veriler silindi.' }
+      : { ok: true, message: UNPAIR_UNREACHABLE_NOTICE };
   }
 
-  async addAccount(token: string): Promise<ActionResult> {
+  async addAccount(token: string, expectedDiscordUserId: string | null = null): Promise<ActionResult> {
     if (!this.isPaired) return { ok: false, message: 'Önce bu bilgisayarı eşleştirin.' };
     if (!this.vault.available) return { ok: false, message: ENCRYPTION_MESSAGE };
     try {
-      const r = await this.accounts.add(token);
+      const r = await this.accounts.add(token, expectedDiscordUserId);
       if (!r.ok) {
         if (r.revoked) await this.handleRevoked();
         return { ok: false, message: r.message };
       }
+      void this.refreshExpectedAccounts();
       const verb = r.registration.result === 'recovered' ? 'yeniden bağlandı' : 'eklendi';
       return { ok: true, message: `${r.account.displayName} ${verb}.` };
     } catch (err) {
@@ -265,13 +339,31 @@ export class ConnectorController extends EventEmitter {
     }
   }
 
+  /**
+   * Reports the removal to the platform (`POST /connectoraccountremovals`), then
+   * deletes the token. The local removal never waits on the platform.
+   */
   async removeAccount(discordUserId: string): Promise<ActionResult> {
-    await this.store.remove(discordUserId);
-    this.o.logger.info('account removed; token deleted', { discordUserId });
-    return {
-      ok: true,
-      message: 'Hesap ve tokeni bu bilgisayardan silindi. Hesabı web panelinden de silmeyi unutmayın.',
-    };
+    if (!this.isPaired) {
+      await this.store.remove(discordUserId);
+      return { ok: true, message: 'Hesap ve tokeni bu bilgisayardan silindi.' };
+    }
+    const outcome = await this.accounts.remove(discordUserId);
+    this.o.logger.info('account removed; token deleted', { discordUserId, platform: outcome.platform });
+    if (outcome.platform === 'revoked') {
+      await this.handleRevoked();
+      return { ok: true, message: REVOKED_NOTICE };
+    }
+    void this.refreshExpectedAccounts();
+    if (outcome.platform === 'unreachable' || outcome.platform === 'refused') {
+      return {
+        ok: true,
+        message:
+          'Hesap ve tokeni bu bilgisayardan silindi, ancak GTextHub sunucusuna bildirilemedi. ' +
+          'Hesap panelde hâlâ bu cihaza bağlı görünebilir.',
+      };
+    }
+    return { ok: true, message: 'Hesap ve tokeni bu bilgisayardan silindi; GTextHub paneline de bildirildi.' };
   }
 
   async setPaused(paused: boolean): Promise<ActionResult> {

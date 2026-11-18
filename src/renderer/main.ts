@@ -1,5 +1,5 @@
 /** The connector window: plain DOM, no framework. All text is Turkish. */
-import type { ConnectorBridge, UiAccount, UiState } from '../shared/ipc';
+import type { ConnectorBridge, UiAccount, UiExpectedAccount, UiState } from '../shared/ipc';
 
 declare global {
   interface Window {
@@ -44,6 +44,8 @@ const platformName = (p: string | null) => (p === 'macos' ? 'macOS' : p === 'win
 
 let current: UiState | null = null;
 let pairNameTouched = false;
+/** The expected account the add form is entering a token for, if any. */
+let addTarget: { discordUserId: string; displayName: string } | null = null;
 
 function statusBadge(a: UiAccount): HTMLElement {
   if (a.status === 'active') return el('span', { className: 'badge badge--ok', text: 'Etkin' });
@@ -51,7 +53,7 @@ function statusBadge(a: UiAccount): HTMLElement {
   return el('span', { className: 'badge badge--warn', text: 'Panel kabul etmedi' });
 }
 
-function avatar(a: UiAccount): HTMLElement {
+function avatar(a: { avatarUrl: string | null; displayName: string }): HTMLElement {
   if (a.avatarUrl && a.avatarUrl.startsWith('https://cdn.discordapp.com/')) {
     const img = el('img', { className: 'avatar' });
     img.src = a.avatarUrl;
@@ -66,7 +68,7 @@ function renderAccount(a: UiAccount): HTMLElement {
   const remove = el('button', { className: 'btn btn--ghost btn--small', text: 'Kaldır' });
   remove.type = 'button';
   remove.addEventListener('click', async () => {
-    if (!confirm(`${a.displayName} hesabı ve tokeni bu bilgisayardan silinsin mi?`)) return;
+    if (!confirm(`${a.displayName} hesabı ve tokeni bu bilgisayardan silinsin mi? Hesap GTextHub panelinde de bu cihazdan ayrılır.`)) return;
     remove.disabled = true;
     const r = await api.removeAccount(a.discordUserId);
     if (!r.ok) {
@@ -109,6 +111,39 @@ function renderAccount(a: UiAccount): HTMLElement {
   return item;
 }
 
+function setAddTarget(target: { discordUserId: string; displayName: string } | null): void {
+  addTarget = target;
+  $('add-target-label').textContent = target ? `Token girilecek hesap: ${target.displayName}` : '';
+  show($('add-target'), !!target);
+}
+
+function renderExpected(a: UiExpectedAccount): HTMLElement {
+  const add = el('button', { className: 'btn btn--primary btn--small', text: 'Token ekle' });
+  add.type = 'button';
+  add.addEventListener('click', () => {
+    setAddTarget({ discordUserId: a.discordUserId, displayName: a.displayName });
+    setMessage('add-error', null);
+    setMessage('add-ok', null);
+    $('add-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    input('add-token').focus();
+  });
+  const badge = a.boundToThisDevice
+    ? el('span', { className: 'badge badge--warn', text: 'Bu hesap için token girin' })
+    : el('span', { className: 'badge badge--warn', text: 'Önceki bir cihazdan' });
+  const meta = el('div', { className: 'account__meta' }, el('p', { className: 'account__name', text: a.displayName }), badge);
+  const item = el('li', { className: 'account account--expected' }, el('div', { className: 'account__head' }, avatar(a), meta, add));
+  item.appendChild(
+    el('p', {
+      className: 'muted small',
+      text: a.boundToThisDevice
+        ? 'Bu hesap için token girin. Token girilene kadar gönderimleri bu bilgisayardan yapılamaz.'
+        : 'Bu hesap daha önce eşleştirilmiş başka bir cihazdaydı. Tokenini girerseniz hesap bu cihaza taşınır.',
+    }),
+  );
+  if (a.disconnectReason) item.appendChild(el('p', { className: 'muted small', text: a.disconnectReason }));
+  return item;
+}
+
 function render(state: UiState): void {
   current = state;
   const paired = state.connection !== 'unpaired';
@@ -141,6 +176,11 @@ function render(state: UiState): void {
       : state.connection === 'offline'
         ? 'Sunucuya ulaşılamıyor; bağlantı geri geldiğinde otomatik olarak devam edilir. Çevrimdışıyken zamanı gelen mesajlar gönderilmez.'
         : 'Zamanı gelen mesajlar bu bilgisayardan gönderilir. Uygulamayı kapatsanız da sistem tepsisinde çalışmaya devam eder.';
+
+    const expected = state.expectedAccounts ?? [];
+    $('expected-accounts').replaceChildren(...expected.map(renderExpected));
+    show($('expected-card'), expected.length > 0);
+    if (addTarget && !expected.some((e) => e.discordUserId === addTarget!.discordUserId)) setAddTarget(null);
 
     const list = $('accounts');
     list.replaceChildren(...state.accounts.map(renderAccount));
@@ -189,15 +229,18 @@ $('add-form').addEventListener('submit', (e) => {
   void withBusy(button('add-submit'), async () => {
     const token = tokenInput.value;
     tokenInput.value = '';
-    const r = await api.addAccount(token);
+    const r = await api.addAccount(token, addTarget?.discordUserId ?? null);
     if (r.ok) {
       input('add-tos').checked = false;
+      setAddTarget(null);
       setMessage('add-ok', r.message ?? 'Hesap eklendi.');
     } else {
       setMessage('add-error', r.message);
     }
   });
 });
+
+button('add-target-clear').addEventListener('click', () => setAddTarget(null));
 
 button('pause-toggle').addEventListener('click', () => {
   if (!current) return;
@@ -208,7 +251,7 @@ button('pause-toggle').addEventListener('click', () => {
 
 button('unpair').addEventListener('click', () => {
   const ok = confirm(
-    'Eşleştirme kaldırılsın mı? Bu bilgisayardaki cihaz kimliği ve tüm Discord tokenleri silinir. Cihazı web panelinden de kaldırın.',
+    'Eşleştirme kaldırılsın mı? Cihaz GTextHub panelinden de kaldırılır; bu bilgisayardaki cihaz kimliği ve tüm Discord tokenleri silinir.',
   );
   if (!ok) return;
   void withBusy(button('unpair'), async () => {

@@ -11,6 +11,8 @@ export interface JournalResult {
   outcome: 'sent' | 'failed';
   reason: string | null;
   tokenRejected: boolean;
+  /** The device holds no token for the account (reported as `tokenMissing: true`). */
+  tokenMissing?: boolean;
 }
 
 export interface JournalEntry {

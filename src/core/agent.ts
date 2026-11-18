@@ -7,6 +7,8 @@
  *   - each request is handled once (journal keyed by request id);
  *   - handOff: send through Discord, then `reportConnectorSendResult`;
  *   - guildChannels: list through Discord, answer `reportConnectorGuildChannels` within 15 s;
+ *     no token held here or Discord unavailable: answer `unavailableReason` at once;
+ *   - expected accounts `GET /deviceexpectedaccounts` on every (re)connect and every 60 s;
  *   - network loss / 5xx: status offline, exponential back-off probes, automatic recovery;
  *   - 401 errMsg_DeviceCredentialInvalid: stop and raise `onRevoked`.
  *
@@ -18,6 +20,7 @@ import {
   type ConnectorApi,
   ConnectorApiError,
   DeviceRevokedError,
+  type ExpectedAccount,
   type GuildChannelsAnswer,
   isConnectivityError,
   type PendingRequest,
@@ -37,6 +40,8 @@ export interface AgentTimings {
   guildChannelsBudgetMs: number;
   /** How long a result report is retried through a connectivity loss (the platform accepts results for 5 min). */
   resultRetryWindowMs: number;
+  /** Cadence of `GET /deviceexpectedaccounts` while online. */
+  expectedAccountsIntervalMs: number;
 }
 
 export const DEFAULT_TIMINGS: AgentTimings = {
@@ -46,15 +51,18 @@ export const DEFAULT_TIMINGS: AgentTimings = {
   backoffMaxMs: 60_000,
   guildChannelsBudgetMs: 12_000,
   resultRetryWindowMs: 5 * 60_000,
+  expectedAccountsIntervalMs: 60_000,
 };
 
 export const PAUSED_REASON = 'Gönderim bağlayıcıda duraklatıldı';
+/** The failure reason of a hand-off for an account whose token this device does not hold. */
+export const TOKEN_MISSING_REASON = 'Bağlayıcıda bu hesabın tokeni yok';
 
 export interface HandledRequestInfo {
   requestId: string;
   kind: PendingRequest['kind'];
   discordUserId: string | null;
-  outcome: 'sent' | 'failed' | 'listed' | 'unanswered';
+  outcome: 'sent' | 'failed' | 'listed' | 'unavailable';
   reason: string | null;
 }
 
@@ -65,6 +73,8 @@ export interface AgentHooks {
   /** Fired on every transition to online (first = the first since start). */
   onOnline?(first: boolean): void;
   onRequestHandled?(info: HandledRequestInfo): void;
+  /** A fresh `GET /deviceexpectedaccounts` answer. */
+  onExpectedAccounts?(accounts: ExpectedAccount[]): void;
 }
 
 export interface AgentDeps {
@@ -97,6 +107,8 @@ export class DeviceAgent {
   private _status: AgentStatus = 'stopped';
   private hbTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private expectedTimer: ReturnType<typeof setTimeout> | null = null;
+  private expectedInFlight: Promise<void> | null = null;
   private failures = 0;
   private wentOnlineOnce = false;
   private heartbeatInFlight = false;
@@ -148,8 +160,10 @@ export class DeviceAgent {
   private clearTimers(): void {
     if (this.hbTimer) clearTimeout(this.hbTimer);
     if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.expectedTimer) clearTimeout(this.expectedTimer);
     this.hbTimer = null;
     this.pollTimer = null;
+    this.expectedTimer = null;
   }
 
   private scheduleHeartbeat(ms: number): void {
@@ -168,6 +182,48 @@ export class DeviceAgent {
     }, ms);
   }
 
+  private scheduleExpected(ms: number): void {
+    if (this.expectedTimer) clearTimeout(this.expectedTimer);
+    this.expectedTimer = setTimeout(() => {
+      this.expectedTimer = null;
+      void this.refreshExpectedAccounts();
+    }, ms);
+  }
+
+  /**
+   * Fetches the accounts the platform expects on this device and hands them to
+   * `onExpectedAccounts`. Runs on every (re)connect, every 60 s while online and
+   * on demand (window opened, an account added or removed). Only while online;
+   * a failure keeps the cadence (the heartbeat owns the online state), a 401
+   * errMsg_DeviceCredentialInvalid revokes.
+   */
+  refreshExpectedAccounts(): Promise<void> {
+    if (this._status !== 'online') return Promise.resolve();
+    if (this.expectedInFlight) return this.expectedInFlight;
+    const run = (async () => {
+      try {
+        const accounts = await this.api.listExpectedAccounts();
+        if (this._status !== 'online') return;
+        this.hooks.onExpectedAccounts?.(accounts);
+      } catch (err) {
+        if (err instanceof DeviceRevokedError) {
+          this.revoke();
+          return;
+        }
+        this.logger.warn('expected accounts not fetched', {
+          status: (err as ConnectorApiError)?.status,
+          errorCode: (err as ConnectorApiError)?.errorCode,
+          error: err instanceof ConnectorApiError ? undefined : (err as Error)?.message,
+        });
+      } finally {
+        this.expectedInFlight = null;
+        if (this._status === 'online') this.scheduleExpected(this.t.expectedAccountsIntervalMs);
+      }
+    })();
+    this.expectedInFlight = run;
+    return run;
+  }
+
   private async heartbeatTick(): Promise<void> {
     if (!this.active || this.heartbeatInFlight) return;
     this.heartbeatInFlight = true;
@@ -184,6 +240,7 @@ export class DeviceAgent {
         this.logger.info(first ? 'connected' : 'reconnected');
         // Catch up at once on every (re)connect.
         this.schedulePoll(0);
+        this.scheduleExpected(0);
         this.hooks.onOnline?.(first);
       }
     } catch (err) {
@@ -230,7 +287,9 @@ export class DeviceAgent {
   private goOffline(where: string, err: unknown): void {
     if (!this.active) return;
     if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.expectedTimer) clearTimeout(this.expectedTimer);
     this.pollTimer = null;
+    this.expectedTimer = null;
     const delay = Math.min(this.t.backoffBaseMs * 2 ** this.failures, this.t.backoffMaxMs);
     this.failures += 1;
     if (this._status !== 'offline') {
@@ -266,13 +325,17 @@ export class DeviceAgent {
     const text = typeof p.text === 'string' ? p.text : null;
 
     let res: DiscordResult;
+    const token = discordUserId ? await this.store.getToken(discordUserId) : null;
     if (!discordUserId || !channelId || !text) {
       res = { ...fail('discordError', { note: 'eksik istek verisi' }) };
+    } else if (!token) {
+      // Not held here (removed, never added, or an account of a previous pairing):
+      // say so explicitly, so the platform can ask the user for the token.
+      res = { ...fail('noToken'), reason: TOKEN_MISSING_REASON, detailedReason: TOKEN_MISSING_REASON };
     } else if (this.isPaused()) {
       res = { ...fail('discordError'), reason: PAUSED_REASON, detailedReason: PAUSED_REASON };
     } else {
-      const token = await this.store.getToken(discordUserId);
-      res = token ? await this.discord.sendMessage(token, channelId, text) : fail('noToken');
+      res = await this.discord.sendMessage(token, channelId, text);
     }
 
     const result: JournalResult = res.failure
@@ -280,6 +343,7 @@ export class DeviceAgent {
           outcome: 'failed',
           reason: String(res.detailedReason || res.reason || 'Gönderilemedi').slice(0, 500),
           tokenRejected: res.failure === 'tokenRejected',
+          ...(res.failure === 'noToken' ? { tokenMissing: true } : {}),
         }
       : { outcome: 'sent', reason: null, tokenRejected: false };
     this.journal.setResult(req.id, result);
@@ -326,18 +390,29 @@ export class DeviceAgent {
     const discordUserId = typeof req.payload?.discordUserId === 'string' ? req.payload.discordUserId : null;
     const token = discordUserId ? await this.store.getToken(discordUserId) : null;
     if (!token) {
-      // Not an account of this device: no answer; the platform's wait times out
-      // and the user can enter the channel id by hand.
+      // Not held here: answer `tokenMissing` at once (the platform shows "list
+      // unavailable" and the user can enter the channel id by hand).
       this.logger.warn('guild channel request for an account not held here', { requestId: req.id, discordUserId });
-      this.hooks.onRequestHandled?.({ requestId: req.id, kind: 'guildChannels', discordUserId, outcome: 'unanswered', reason: 'noToken' });
+      await this.deliver(
+        req.id,
+        () => this.api.reportGuildChannelsUnavailable(req.id, 'tokenMissing'),
+        this.t.guildChannelsBudgetMs,
+      );
+      this.hooks.onRequestHandled?.({ requestId: req.id, kind: 'guildChannels', discordUserId, outcome: 'unavailable', reason: TOKEN_MISSING_REASON });
       return;
     }
     const listed = await this.discord.listGuildChannels(token, this.t.guildChannelsBudgetMs);
     if (!listed.ok && listed.failure !== 'tokenRejected') {
-      // Discord unreachable or rate limited: an empty "listed" answer would
-      // mislead; let the platform's wait time out instead.
+      // Discord unreachable (network, 5xx) or refusing for now (429): an empty
+      // "listed" answer would mislead, so say "unavailable" instead of letting
+      // the platform's wait time out.
       this.logger.warn('guild channel listing failed', { requestId: req.id, failure: listed.failure });
-      this.hooks.onRequestHandled?.({ requestId: req.id, kind: 'guildChannels', discordUserId, outcome: 'unanswered', reason: listed.reason });
+      await this.deliver(
+        req.id,
+        () => this.api.reportGuildChannelsUnavailable(req.id, 'discordUnavailable'),
+        this.t.guildChannelsBudgetMs,
+      );
+      this.hooks.onRequestHandled?.({ requestId: req.id, kind: 'guildChannels', discordUserId, outcome: 'unavailable', reason: listed.reason });
       return;
     }
     const tokenRejected = listed.failure === 'tokenRejected';
