@@ -1,0 +1,34 @@
+{
+  "name": "gtexthub-connector",
+  "productName": "GTextHub Bağlayıcı",
+  "version": "0.1.0",
+  "description": "GTextHub masaüstü bağlayıcısı: zamanlanmış Discord mesajlarını kullanıcının kendi bilgisayarından gönderir.",
+  "private": true,
+  "author": "GTextHub",
+  "license": "UNLICENSED",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.renderer.json",
+    "bundle": "node scripts/build.mjs",
+    "build": "npm run typecheck && npm run bundle",
+    "dev": "node scripts/build.mjs --dev && electron .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "icons": "node scripts/gen-icons.mjs",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "45.3.4",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  },
+  "allowScripts": {
+    "electron@45.3.4": true,
+    "esbuild@0.28.2": true
+  }
+}
