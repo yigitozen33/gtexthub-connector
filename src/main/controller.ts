@@ -54,6 +54,39 @@ const STATUS_LABELS: Record<UiConnection, string> = {
 
 const REVOKED_NOTICE =
   'Bu cihazın eşleştirmesi kaldırılmış. Yerel veriler silindi; devam etmek için web panelinden yeni bir eşleştirme kodu alın.';
+/** `disconnectReason` of an account the user removed in this program (POST /connectoraccountremovals). */
+export const CONNECTOR_REMOVED_REASON = 'connector-removed';
+
+/**
+ * Splits the expected accounts this device holds no token for: those the user
+ * removed here (`connector-removed`, still bound to this device) go to a quiet
+ * list; everything else (token-missing, path-changed, device-revoked, other
+ * reasons, or `boundToThisDevice: false`) is a prompt for a token.
+ */
+export function splitExpectedAccounts(
+  expected: ExpectedAccount[],
+  heldDiscordUserIds: Iterable<string>,
+): { prompt: UiExpectedAccount[]; removed: UiExpectedAccount[] } {
+  const held = new Set(heldDiscordUserIds);
+  const prompt: UiExpectedAccount[] = [];
+  const removed: UiExpectedAccount[] = [];
+  for (const e of expected) {
+    if (held.has(e.discordUserId)) continue;
+    const row: UiExpectedAccount = {
+      accountId: e.accountId,
+      discordUserId: e.discordUserId,
+      displayName: e.displayName,
+      avatarUrl: e.avatarUrl,
+      status: e.status,
+      disconnectReason: e.disconnectReason,
+      boundToThisDevice: e.boundToThisDevice,
+    };
+    if (e.boundToThisDevice && e.disconnectReason === CONNECTOR_REMOVED_REASON) removed.push(row);
+    else prompt.push(row);
+  }
+  return { prompt, removed };
+}
+
 const UNPAIR_UNREACHABLE_NOTICE =
   'Eşleştirme bu bilgisayarda kaldırıldı ve yerel veriler silindi, ancak GTextHub sunucusuna ulaşılamadı. ' +
   'Cihaz panelde hâlâ görünüyorsa web panelindeki Cihazlar sayfasından da kaldırın.';
@@ -124,6 +157,9 @@ export class ConnectorController extends EventEmitter {
 
   state(): UiState {
     const connection = this.connection();
+    const expected = this.isPaired
+      ? splitExpectedAccounts(this.expected, this.stateFile.state.accounts.map((a) => a.discordUserId))
+      : { prompt: [], removed: [] };
     return {
       connection,
       statusLabel: STATUS_LABELS[connection],
@@ -132,7 +168,8 @@ export class ConnectorController extends EventEmitter {
       device: this.isPaired ? this.stateFile.state.device : null,
       defaultDeviceName: this.o.defaultDeviceName,
       platform: this.o.platform,
-      expectedAccounts: this.isPaired ? this.expectedWithoutToken() : [],
+      expectedAccounts: expected.prompt,
+      removedAccounts: expected.removed,
       accounts: this.stateFile.state.accounts.map((a) => ({
         discordUserId: a.discordUserId,
         displayName: a.displayName,
@@ -152,22 +189,6 @@ export class ConnectorController extends EventEmitter {
       version: this.o.version,
       environment: this.o.environment,
     };
-  }
-
-  /** Expected accounts whose token this device does not hold. */
-  private expectedWithoutToken(): UiExpectedAccount[] {
-    const held = new Set(this.stateFile.state.accounts.map((a) => a.discordUserId));
-    return this.expected
-      .filter((e) => !held.has(e.discordUserId))
-      .map((e) => ({
-        accountId: e.accountId,
-        discordUserId: e.discordUserId,
-        displayName: e.displayName,
-        avatarUrl: e.avatarUrl,
-        status: e.status,
-        disconnectReason: e.disconnectReason,
-        boundToThisDevice: e.boundToThisDevice,
-      }));
   }
 
   /** Re-fetches the expected accounts (window opened, account added or removed). */

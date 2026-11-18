@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Redactor, nullLogger } from '../src/core/logger';
-import { ConnectorController } from '../src/main/controller';
+import { CONNECTOR_REMOVED_REASON, ConnectorController, splitExpectedAccounts } from '../src/main/controller';
 import type { Encryptor } from '../src/main/storage';
 import { NetworkError } from '../src/core/http';
 import { API_BASE, MockHttp, TOKEN, json, problem } from './helpers';
@@ -320,5 +320,67 @@ describe('unpair (PATCH /connectorselfrevoke)', () => {
     expect(s.accounts).toHaveLength(0);
     expect(s.notice).toMatch(/Cihazlar sayfasından/);
     expect(fs.existsSync(path.join(dir, 'secrets.bin'))).toBe(false);
+  });
+});
+
+describe('removed accounts are listed quietly, not as a token prompt', () => {
+  const row = (discordUserId: string, disconnectReason: string | null, boundToThisDevice = true) => ({
+    ...expectedRow(discordUserId, `u${discordUserId}`, boundToThisDevice),
+    disconnectReason,
+  });
+
+  it('splits connector-removed (bound here) from every other reason', () => {
+    const { prompt, removed } = splitExpectedAccounts(
+      [
+        row('1', CONNECTOR_REMOVED_REASON),
+        row('2', 'token-missing'),
+        row('3', 'path-changed'),
+        row('4', 'device-revoked'),
+        row('5', 'something-new'),
+        row('6', null),
+        row('7', CONNECTOR_REMOVED_REASON, false), // bound elsewhere / to none: a re-pair candidate
+        row('8', CONNECTOR_REMOVED_REASON), // held here again: in neither list
+      ],
+      ['8'],
+    );
+    expect(CONNECTOR_REMOVED_REASON).toBe('connector-removed');
+    expect(removed.map((r) => r.discordUserId)).toEqual(['1']);
+    expect(prompt.map((r) => r.discordUserId)).toEqual(['2', '3', '4', '5', '6', '7']);
+  });
+
+  it('moves an account the user just removed to removedAccounts; re-adding clears it', async () => {
+    let removedHere = false;
+    const http = serverMock().on('GET', EXPECTED, () =>
+      json(200, {
+        id: 'dev-1',
+        accounts: removedHere ? [{ ...expectedRow('42', 'neo', true), status: 'disconnected', disconnectReason: 'connector-removed' }] : [],
+      }),
+    );
+    const c = await pairedController(http);
+    await c.addAccount(TOKEN);
+    removedHere = true;
+    await c.removeAccount('42');
+    await vi.advanceTimersByTimeAsync(0);
+    let s = c.state();
+    expect(s.expectedAccounts).toEqual([]);
+    expect(s.removedAccounts.map((a) => [a.discordUserId, a.disconnectReason])).toEqual([['42', 'connector-removed']]);
+
+    // "Yeniden ekle" uses the same targeted add flow.
+    const again = await c.addAccount(TOKEN, '42');
+    expect(again.ok).toBe(true);
+    s = c.state();
+    expect(s.removedAccounts).toEqual([]);
+    expect(s.accounts.map((a) => a.discordUserId)).toEqual(['42']);
+    c.shutdown();
+  });
+
+  it('keeps other reasons in the prompt card', async () => {
+    const http = serverMock().on('GET', EXPECTED, () =>
+      json(200, { accounts: [{ ...expectedRow('42', 'neo', true), disconnectReason: 'token-missing' }] }),
+    );
+    const c = await pairedController(http);
+    expect(c.state().expectedAccounts.map((a) => a.discordUserId)).toEqual(['42']);
+    expect(c.state().removedAccounts).toEqual([]);
+    c.shutdown();
   });
 });

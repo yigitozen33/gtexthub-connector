@@ -25,6 +25,8 @@ GTextHub platformuna yalnızca hesabın Discord kimliği, adı ve avatarı bildi
    bağlı olmayan hesaplardır (`boundToThisDevice: false`, yeniden eşleştirme adayları). Pencerede, bu bilgisayarda tokeni olmayan
    hesaplar "Token bekleyen hesaplar" kartında listelenir ("Bu hesap için token girin" / "Önceki bir cihazdan") ve **Token ekle**
    ile olağan hesap ekleme formu o hesaba hedeflenir. Girilen token başka bir hesaba aitse platforma hiçbir şey bildirilmeden reddedilir.
+   Kullanıcının bu programda kaldırdığı hesaplar (`disconnectReason: 'connector-removed'`, `boundToThisDevice: true`) bu kartta
+   gösterilmez; "Discord hesapları" kartının altındaki sessiz "Kaldırılan hesaplar" listesinde **Yeniden ekle** ile durur.
 5. **Hesap ekleme.** Token önce yerelde Discord'a (`GET /users/@me`) doğrulatılır, sonra yalnızca hesap bilgisi
    `POST /connectoraccountreports` ile bildirilir. Platform kabul ederse token şifreli olarak saklanır. Önceki (kaldırılmış) bir
    cihaza bağlı hesap bu çağrıyla bu cihaza yeniden bağlanır.

@@ -61,6 +61,11 @@ export interface UiState {
   accounts: UiAccount[];
   /** Accounts waiting for a token on this device ("Bu hesap için token girin"). */
   expectedAccounts: UiExpectedAccount[];
+  /**
+   * Accounts the user removed in this program (`disconnectReason: 'connector-removed'`,
+   * still bound here): listed quietly ("Kaldırılan hesaplar"), never as a prompt.
+   */
+  removedAccounts: UiExpectedAccount[];
   /** False when the OS keychain / DPAPI is unavailable; nothing secret can be stored then. */
   encryptionAvailable: boolean;
   /** A one-off notice, e.g. after a revocation. */

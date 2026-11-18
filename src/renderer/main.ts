@@ -117,16 +117,36 @@ function setAddTarget(target: { discordUserId: string; displayName: string } | n
   show($('add-target'), !!target);
 }
 
+/** Turkish line for a platform `disconnectReason` code; unknown codes are not shown. */
+function disconnectReasonText(code: string | null): string | null {
+  if (code === 'token-missing') return 'Bağlayıcı bu hesabın tokenini bulamadı.';
+  if (code === 'path-changed') return 'Hesabın gönderim yolu panelde bağlayıcı olarak değiştirildi.';
+  if (code === 'device-revoked') return 'Hesabın bağlı olduğu cihaz kaldırıldı.';
+  return null;
+}
+
+/** Points the add-account form at an expected account and brings it into view. */
+function openAddFor(a: UiExpectedAccount): void {
+  setAddTarget({ discordUserId: a.discordUserId, displayName: a.displayName });
+  setMessage('add-error', null);
+  setMessage('add-ok', null);
+  $('add-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  input('add-token').focus();
+}
+
+/** A quiet row of an account the user removed here; no prompt, only "Yeniden ekle". */
+function renderRemoved(a: UiExpectedAccount): HTMLElement {
+  const again = el('button', { className: 'btn btn--ghost btn--small', text: 'Yeniden ekle' });
+  again.type = 'button';
+  again.addEventListener('click', () => openAddFor(a));
+  const meta = el('div', { className: 'account__meta' }, el('p', { className: 'account__name', text: a.displayName }));
+  return el('li', { className: 'account account--removed' }, el('div', { className: 'account__head' }, avatar(a), meta, again));
+}
+
 function renderExpected(a: UiExpectedAccount): HTMLElement {
   const add = el('button', { className: 'btn btn--primary btn--small', text: 'Token ekle' });
   add.type = 'button';
-  add.addEventListener('click', () => {
-    setAddTarget({ discordUserId: a.discordUserId, displayName: a.displayName });
-    setMessage('add-error', null);
-    setMessage('add-ok', null);
-    $('add-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    input('add-token').focus();
-  });
+  add.addEventListener('click', () => openAddFor(a));
   const badge = a.boundToThisDevice
     ? el('span', { className: 'badge badge--warn', text: 'Bu hesap için token girin' })
     : el('span', { className: 'badge badge--warn', text: 'Önceki bir cihazdan' });
@@ -140,7 +160,8 @@ function renderExpected(a: UiExpectedAccount): HTMLElement {
         : 'Bu hesap daha önce eşleştirilmiş başka bir cihazdaydı. Tokenini girerseniz hesap bu cihaza taşınır.',
     }),
   );
-  if (a.disconnectReason) item.appendChild(el('p', { className: 'muted small', text: a.disconnectReason }));
+  const why = disconnectReasonText(a.disconnectReason);
+  if (why) item.appendChild(el('p', { className: 'muted small', text: why }));
   return item;
 }
 
@@ -178,9 +199,12 @@ function render(state: UiState): void {
         : 'Zamanı gelen mesajlar bu bilgisayardan gönderilir. Uygulamayı kapatsanız da sistem tepsisinde çalışmaya devam eder.';
 
     const expected = state.expectedAccounts ?? [];
+    const removed = state.removedAccounts ?? [];
     $('expected-accounts').replaceChildren(...expected.map(renderExpected));
     show($('expected-card'), expected.length > 0);
-    if (addTarget && !expected.some((e) => e.discordUserId === addTarget!.discordUserId)) setAddTarget(null);
+    $('removed-accounts').replaceChildren(...removed.map(renderRemoved));
+    show($('removed-section'), removed.length > 0);
+    if (addTarget && ![...expected, ...removed].some((e) => e.discordUserId === addTarget!.discordUserId)) setAddTarget(null);
 
     const list = $('accounts');
     list.replaceChildren(...state.accounts.map(renderAccount));
